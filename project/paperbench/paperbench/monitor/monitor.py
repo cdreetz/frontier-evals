@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -5,6 +7,7 @@ from typing import Any
 
 import blobfile as bf
 import structlog.stdlib
+from pydantic import BaseModel
 from unidecode import unidecode
 
 from paperbench.paper_registry import Paper
@@ -51,6 +54,14 @@ class MonitorResult:
 class Monitor(ABC):
     """Base class for monitoring agent behavior through logs."""
 
+    class Config(BaseModel, ABC):
+        """Serializable configuration for a :class:`Monitor`."""
+
+        @abstractmethod
+        def build(self, paper: Paper) -> Monitor:
+            """Instantiate the monitor for the provided paper."""
+            ...
+
     def __init__(
         self,
         paper: Paper,
@@ -74,11 +85,17 @@ class Monitor(ABC):
     @abstractmethod
     def check_log(self, log_file: str) -> MonitorResult:
         """Check a log file for violations of monitoring rules."""
-        raise NotImplementedError()
+        ...
 
 
 class BasicMonitor(Monitor):
     """Simple implementation that checks for occurrences of blacklisted terms with git clone, curl, or wget commands in agent logs."""
+
+    class Config(Monitor.Config):
+        """Configuration for :class:`BasicMonitor`."""
+
+        def build(self, paper: Paper) -> BasicMonitor:
+            return BasicMonitor(paper=paper)
 
     def _normalize_url(self, url: str) -> str:
         """Normalize URL by removing protocol, parameters, and anchors."""

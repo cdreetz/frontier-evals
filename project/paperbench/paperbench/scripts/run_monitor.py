@@ -1,4 +1,5 @@
-import argparse
+from __future__ import annotations
+
 import asyncio
 import datetime
 import json
@@ -11,10 +12,36 @@ from typing import Any
 import structlog.stdlib
 from tqdm.asyncio import tqdm_asyncio
 
-from paperbench.monitor.create_monitor import create_monitor
+import chz
+from paperbench.monitor.monitor import BasicMonitor, Monitor
 from paperbench.paper_registry import paper_registry
 
 logger = structlog.stdlib.get_logger(component=__name__)
+
+
+def _describe_monitor_config(monitor_config: Monitor.Config) -> str:
+    return f"{monitor_config.__class__.__module__}.{monitor_config.__class__.__qualname__}"
+
+
+@chz.chz
+class MonitorCLIArgs:
+    """Monitor agent logs for violations."""
+
+    logs_dir: Path = chz.field(
+        doc="Directory containing multiple run groups.",
+    )
+    run_groups: list[str] = chz.field(
+        default_factory=list,
+        doc="List of run group IDs to monitor.",
+    )
+    monitor_config: Monitor.Config = chz.field(
+        default_factory=BasicMonitor.Config,
+        doc="Specify the monitor to use (default: BasicMonitor).",
+    )
+    out_dir: Path | None = chz.field(
+        default=None,
+        doc="Directory to save the monitor results JSON file (default: current directory).",
+    )
 
 
 def get_paper_id_from_run_id(run_id: str) -> str:
@@ -24,7 +51,7 @@ def get_paper_id_from_run_id(run_id: str) -> str:
 
 async def monitor_single_log(
     run_dir: Path,
-    monitor_type: str,
+    monitor_config: Monitor.Config,
 ) -> dict[str, Any] | None:
     """
     Monitor a single run's log with the specified monitor.
@@ -67,22 +94,24 @@ async def monitor_single_log(
         logger.warning(f"Log file not found at {log_file}")
         return None
 
-    logger.info(f"Running monitor on agent.log from {run_id}")
+    monitor_config_payload = monitor_config.model_dump(mode="json")
+    logger.info(
+        f"Running monitor on agent.log from {run_id}",
+        monitor=_describe_monitor_config(monitor_config),
+        monitor_config_json=json.dumps(monitor_config_payload, indent=2),
+    )
 
     # Create monitor
     paper = paper_registry.get_paper(paper_id)
-    monitor = create_monitor(
-        monitor_type=monitor_type,
-        paper=paper,
-        monitor_kwargs={},
-    )
+    monitor = monitor_config.build(paper=paper)
 
     # Run monitor on the log file
     result = await asyncio.to_thread(monitor.check_log, log_file.as_posix())
 
     return {
         "run_group_id": run_dir.parent.name,
-        "monitor_type": monitor_type,
+        "monitor_type": _describe_monitor_config(monitor_config),
+        "monitor_config": monitor_config_payload,
         "paper_id": paper_id,
         "log_file": str(log_file),
         "run_id": run_id,
@@ -103,7 +132,7 @@ async def monitor_single_log(
 
 async def monitor_run_group(
     group_dir: Path,
-    monitor_type: str,
+    monitor_config: Monitor.Config,
 ) -> list[dict[str, Any] | None]:
     """Monitor all runs in a run group directory."""
     run_group_id = group_dir.name
@@ -115,7 +144,7 @@ async def monitor_run_group(
     tasks = [
         monitor_single_log(
             run_dir=run_dir,
-            monitor_type=monitor_type,
+            monitor_config=monitor_config,
         )
         for run_dir in run_dirs
     ]
@@ -126,7 +155,7 @@ async def monitor_run_group(
 
 async def monitor_multiple_run_groups(
     logs_dir: Path,
-    monitor_type: str,
+    monitor_config: Monitor.Config,
     run_groups: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Run monitor on multiple run groups that are in a directory of run groups."""
@@ -154,7 +183,7 @@ async def monitor_multiple_run_groups(
     tasks = [
         monitor_run_group(
             group_dir=logs_dir / run_group_id,
-            monitor_type=monitor_type,
+            monitor_config=monitor_config,
         )
         for run_group_id in run_groups
     ]
@@ -169,10 +198,13 @@ async def monitor_multiple_run_groups(
     flagged_results = [result for result in all_results if len(result["results"]["violations"]) > 0]
     other_results = [result for result in all_results if len(result["results"]["violations"]) == 0]
 
+    monitor_config_payload = monitor_config.model_dump(mode="json")
+
     # Create final output with results and summary
     return {
         "timestamp": datetime.datetime.now().isoformat(),
-        "monitor_type": monitor_type,
+        "monitor_type": _describe_monitor_config(monitor_config),
+        "monitor_config": monitor_config_payload,
         "logs_dir": str(logs_dir.absolute()),
         "run_groups": run_groups,
         "total_runs": len(all_results),
@@ -184,8 +216,8 @@ async def monitor_multiple_run_groups(
 
 
 async def main(
-    monitor_type: str,
     logs_dir: Path,
+    monitor_config: Monitor.Config,
     run_groups: list[str] | None = None,
     out_dir: Path | None = None,
 ) -> None:
@@ -193,12 +225,14 @@ async def main(
     Main function to run the monitor on a directory of logs.
     """
 
+    monitor_config = monitor_config.model_copy()
+
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     results = await monitor_multiple_run_groups(
         logs_dir=logs_dir,
-        monitor_type=monitor_type,
+        monitor_config=monitor_config,
         run_groups=run_groups,
     )
 
@@ -211,41 +245,14 @@ async def main(
         logger.info(f"All monitor results written to {output_file}")
 
 
+async def _run_from_cli(args: MonitorCLIArgs) -> None:
+    await main(
+        logs_dir=args.logs_dir,
+        monitor_config=args.monitor_config,
+        run_groups=args.run_groups or None,
+        out_dir=args.out_dir,
+    )
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Monitor agent logs for violations.")
-    parser.add_argument(
-        "--logs-dir",
-        type=Path,
-        help="Directory containing multiple run groups.",
-        required=True,
-    )
-    parser.add_argument(
-        "--run-groups",
-        nargs="+",
-        help="List of run group IDs to monitor.",
-        required=False,
-    )
-    parser.add_argument(
-        "-m",
-        "--monitor",
-        choices=["basic"],
-        default="basic",
-        help="Specify the monitor to use (default: basic).",
-    )
-    parser.add_argument(
-        "--out-dir",
-        type=Path,
-        help="Directory to save the monitor results JSON file (default: current directory).",
-        required=False,
-    )
-
-    args = parser.parse_args()
-
-    asyncio.run(
-        main(
-            monitor_type=args.monitor,
-            logs_dir=args.logs_dir,
-            run_groups=args.run_groups,
-            out_dir=args.out_dir,
-        )
-    )
+    asyncio.run(chz.nested_entrypoint(_run_from_cli))

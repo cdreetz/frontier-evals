@@ -38,8 +38,7 @@ from paperbench.constants import (
     WORKSPACE_BASE,
 )
 from paperbench.grade import JudgeOutput, grade_submission
-from paperbench.monitor.create_monitor import create_monitor
-from paperbench.monitor.monitor import MonitorResult
+from paperbench.monitor.monitor import Monitor, MonitorResult
 from paperbench.nano.structs import (
     JudgeConfig,
     PaperBenchGrade,
@@ -68,6 +67,7 @@ class PBTask(ComputerTask):
     target_duration_hr: int | None
     reproduction: ReproductionConfig
     judge: JudgeConfig
+    monitor_config: Monitor.Config
     skipped_rollout: bool = False  # whether rollouts were skipped (e.g. if we're resuming)
 
     save_cluster_output_to_host: bool
@@ -334,10 +334,7 @@ class PBTask(ComputerTask):
             return False
 
     def _run_monitor(self, log_file_path: str) -> MonitorResult:
-        """
-        Runs the monitor on an given log file
-        TODO: make this configurable through chz in `PaperBenchEval`
-        """
+        """Run the configured monitor on the given log file."""
         ctx_logger = logger.bind(
             run_group_id=self.run_group_id, run_id=self.run_id, runs_dir=self.runs_dir
         )
@@ -346,11 +343,7 @@ class PBTask(ComputerTask):
             f"Running monitor on {self.run_id} agent.log", destinations=["run"], _print=True
         )
         paper = paper_registry.get_paper(self.paper_id)
-        monitor = create_monitor(
-            monitor_type="basic",
-            paper=paper,
-            monitor_kwargs={},
-        )
+        monitor = self.monitor_config.build(paper=paper)
         monitor_result = monitor.check_log(log_file_path)
         return monitor_result
 

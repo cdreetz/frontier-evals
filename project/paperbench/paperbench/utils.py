@@ -4,7 +4,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable, ParamSpec, Sequence, TypeVar
+from typing import Any, Awaitable, Callable, Literal, ParamSpec, Sequence, TypeVar
 
 import blobfile as bf
 import numpy as np
@@ -159,6 +159,19 @@ def get_timestamp() -> str:
     """Returns the current timestamp in the format `YYYY-MM-DDTHH-MM-SS-Z`."""
 
     return time.strftime("%Y-%m-%dT%H-%M-%S-%Z", time.gmtime())
+
+
+def normalize_not_given(value: Literal["NOT_GIVEN"] | None) -> openai.NotGiven | None:
+    """Normalize OpenAI's NotGiven sentinel string/object to ``None``.
+
+    JSON dumps of ``openai.NotGiven`` will surface as the literal string ``"NOT_GIVEN"``
+    when using TurnCompleters. We coerce this back to the actual ``openai.NotGiven``
+    to maintain consistency with other uses of OpenAI's API.
+    """
+
+    if isinstance(value, str) and value == "NOT_GIVEN":
+        return openai.NotGiven()
+    return value
 
 
 def safe_mean(values: Sequence[float | int], default: float = np.nan) -> float:

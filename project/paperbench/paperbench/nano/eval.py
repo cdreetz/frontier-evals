@@ -18,6 +18,7 @@ from nanoeval.solvers.computer_tasks.solver import PythonCodingEval
 from nanoeval.solvers.computer_tasks.steps import FinalResult
 from nanoeval.solvers.computer_tasks.task import ComputerTask
 from paperbench.metrics import compute_agg_stats, per_paper_results
+from paperbench.monitor.monitor import BasicMonitor, Monitor
 from paperbench.nano.structs import (
     JudgeConfig,
     PaperBenchGrade,
@@ -48,6 +49,7 @@ logger = structlog.stdlib.get_logger(component=__name__)
 class PaperBench(PythonCodingEval):
     reproduction: ReproductionConfig = chz.field(default_factory=ReproductionConfig)
     judge: JudgeConfig = chz.field(default_factory=JudgeConfig)
+    monitor_config: Monitor.Config = chz.field(default_factory=BasicMonitor.Config)
 
     # task args
     paper_split: Literal["debug", "dev", "human", "testing", "all"] = chz.field(
@@ -153,6 +155,7 @@ class PaperBench(PythonCodingEval):
                         target_duration_hr=self.target_duration_hr,
                         judge=self.judge,
                         reproduction=self.reproduction,
+                        monitor_config=self.monitor_config,
                         save_cluster_output_to_host=self.save_cluster_output_to_host,
                         network_mode=NetworkMode.UNPROXIED
                         if self.allow_internet
