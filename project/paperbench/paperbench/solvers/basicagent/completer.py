@@ -15,7 +15,7 @@ from preparedness_turn_completer.turn_completer import TurnCompleter
 from preparedness_turn_completer.utils import RetryConfig, retry_predicate
 from pydantic import Field
 
-from paperbench.agents.basicagent.tools.base import Tool
+from paperbench.solvers.basicagent.tools.base import Tool
 
 logger = structlog.stdlib.get_logger(component=__name__)
 
