@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -57,6 +58,27 @@ def is_docker_running(timeout: float = 10.0) -> bool:
         return DockerClient(timeout=timeout).ping()
     except DockerException:
         return False
+
+
+def host_has_nvidia_smi(timeout: float = 5.0) -> bool:
+    """Return True if `nvidia-smi` exists on the host and exits successfully."""
+
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return False
+
+    try:
+        result = subprocess.run(
+            [nvidia_smi],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    return result.returncode == 0
 
 
 def load_yaml_dict(fpath: Path) -> dict[str, Any]:

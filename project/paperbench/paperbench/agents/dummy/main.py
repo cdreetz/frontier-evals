@@ -1,19 +1,9 @@
 import getpass
 import os
-import subprocess
 import sys
 
 if os.environ.get("DEBUG", None) == "1":
     os.system("tail -f /dev/null")  # block indefinitely
-
-
-# check if gpu is available on machine
-try:
-    subprocess.run(["nvidia-smi"], check=True)
-    print("nvidia-smi command executed successfully.")
-except Exception as e:
-    print(f"nvidia-smi failed with error: {e}")
-    print("This is expected if you are not running on a GPU instance.")
 
 
 # Get the current user's username

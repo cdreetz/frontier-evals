@@ -59,7 +59,7 @@ class BaseAlcatrazComputerInterfaceNoJupyter(ComputerInterface, ABC):
         res = await self.send_shell_command("hostname")
         cid_prefix = res.output.decode().strip()
 
-        await self.cluster.add_container_network_block_via_ip_tables(cid_prefix)
+        await self._cluster.add_container_network_block_via_ip_tables(cid_prefix)
 
         # Verify
         logger.info("Post-setup network access disabled")
