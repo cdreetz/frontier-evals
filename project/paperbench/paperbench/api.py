@@ -32,7 +32,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypedDict
 
 import yaml
 
@@ -40,6 +40,7 @@ import yaml
 # This allows api.py to be imported without pulling in all dependencies
 
 if TYPE_CHECKING:
+    from datasets import Dataset
     from nanoeval.solvers.computer_tasks.code_execution_interface import ComputerInterface
 
 
@@ -426,8 +427,24 @@ def read_paper_rubric(paper_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class FunctionDefinition(TypedDict):
+    """Function definition inside a tool."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+class ChatCompletionToolParam(TypedDict):
+    """Tool definition in OpenAI ChatCompletionToolParam format."""
+
+    type: str
+    function: FunctionDefinition
+
+
+# Keep ToolDefinition for backwards compatibility (flat format)
 class ToolDefinition(TypedDict):
-    """Tool definition in OpenAI function format."""
+    """Tool definition in flat format (legacy)."""
 
     type: str
     name: str
@@ -435,149 +452,180 @@ class ToolDefinition(TypedDict):
     parameters: dict[str, Any]
 
 
-def get_tool_definitions() -> list[ToolDefinition]:
-    """
-    Get the paperbench tool definitions in OpenAI function format.
+# Internal tool definitions (flat format for internal use)
+_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "name": "bash",
+        "description": "Use this function to execute bash commands.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cmd": {
+                    "type": "string",
+                    "description": "The bash command to execute.",
+                },
+            },
+            "required": ["cmd"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "python-tool",
+        "description": (
+            "Use the python function to execute Python code.\n\n"
+            "The Python tool executes single-run Python scripts. Important notes:\n"
+            "1. Each execution is independent - no state is preserved between runs\n"
+            "2. You must explicitly use print() statements to see any output\n"
+            "3. Simply writing expressions (like in notebooks) will not display results\n"
+            "4. The script cannot accept interactive input during execution\n"
+            "5. Return statements alone won't produce visible output\n"
+            "6. All variables and imports are cleared between executions\n"
+            "7. Standard output (via print()) is the only way to see results"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The python code to execute.",
+                }
+            },
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "read_file_chunk",
+        "description": "Read a chunk of lines from a file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": "Path to the file to read.",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "Line number to start reading from (1-indexed).",
+                    "default": 1,
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to read (default: 50, max: 50).",
+                    "default": 50,
+                },
+            },
+            "required": ["file"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "search_file",
+        "description": (
+            "Search for a keyword or phrase in a file and return matching lines with context."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": "Path to the file to search.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Text to search for (case-insensitive).",
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Number of lines of context to show before and after each match (default: 2).",
+                    "default": 2,
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to return per page (default: 5).",
+                    "default": 5,
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "Which page of results to return (1-indexed, default: 1).",
+                    "default": 1,
+                },
+            },
+            "required": ["file", "query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "submit",
+        "description": "Signal that you are completely finished.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "end_message": {
+                    "type": "string",
+                    "description": "Final message to signal that you are finished.",
+                },
+            },
+            "required": ["end_message"],
+            "additionalProperties": False,
+        },
+    },
+]
 
-    These are the tools available to the agent during a rollout:
-    - bash: Execute bash commands
-    - python-tool: Execute Python code
-    - read_file_chunk: Read a portion of a file with line numbers
-    - search_file: Search for text in a file with context
-    - submit: Signal that the agent is finished
+
+def get_oai_tools() -> list[ChatCompletionToolParam]:
+    """
+    Get paperbench tools in OpenAI ChatCompletionToolParam format.
+
+    This is the format expected by OpenAI's chat completions API
+    and frameworks that use it (like your verifiers Environment).
 
     Returns:
-        List of tool definitions in OpenAI function tool format
+        List of tools in ChatCompletionToolParam format with nested 'function' key
 
     Example:
-        >>> tools = get_tool_definitions()
-        >>> tool_names = [t["name"] for t in tools]
-        >>> "bash" in tool_names
-        True
+        >>> oai_tools = get_oai_tools()
+        >>> oai_tools[0]["type"]
+        'function'
+        >>> oai_tools[0]["function"]["name"]
+        'bash'
     """
     return [
         {
             "type": "function",
-            "name": "bash",
-            "description": "Use this function to execute bash commands.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "cmd": {
-                        "type": "string",
-                        "description": "The bash command to execute.",
-                    },
-                },
-                "required": ["cmd"],
-                "additionalProperties": False,
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
             },
-        },
-        {
-            "type": "function",
-            "name": "python-tool",
-            "description": (
-                "Use the python function to execute Python code.\n\n"
-                "The Python tool executes single-run Python scripts. Important notes:\n"
-                "1. Each execution is independent - no state is preserved between runs\n"
-                "2. You must explicitly use print() statements to see any output\n"
-                "3. Simply writing expressions (like in notebooks) will not display results\n"
-                "4. The script cannot accept interactive input during execution\n"
-                "5. Return statements alone won't produce visible output\n"
-                "6. All variables and imports are cleared between executions\n"
-                "7. Standard output (via print()) is the only way to see results"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "The python code to execute.",
-                    }
-                },
-                "required": ["code"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "type": "function",
-            "name": "read_file_chunk",
-            "description": "Read a chunk of lines from a file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file": {
-                        "type": "string",
-                        "description": "Path to the file to read.",
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "description": "Line number to start reading from (1-indexed).",
-                        "default": 1,
-                    },
-                    "max_lines": {
-                        "type": "integer",
-                        "description": "Maximum number of lines to read (default: 50, max: 50).",
-                        "default": 50,
-                    },
-                },
-                "required": ["file"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "type": "function",
-            "name": "search_file",
-            "description": (
-                "Search for a keyword or phrase in a file and return matching lines with context."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file": {
-                        "type": "string",
-                        "description": "Path to the file to search.",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Text to search for (case-insensitive).",
-                    },
-                    "context_lines": {
-                        "type": "integer",
-                        "description": "Number of lines of context to show before and after each match (default: 2).",
-                        "default": 2,
-                    },
-                    "max_matches": {
-                        "type": "integer",
-                        "description": "Maximum number of matches to return per page (default: 5).",
-                        "default": 5,
-                    },
-                    "page": {
-                        "type": "integer",
-                        "description": "Which page of results to return (1-indexed, default: 1).",
-                        "default": 1,
-                    },
-                },
-                "required": ["file", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "type": "function",
-            "name": "submit",
-            "description": "Signal that you are completely finished.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "end_message": {
-                        "type": "string",
-                        "description": "Final message to signal that you are finished.",
-                    },
-                },
-                "required": ["end_message"],
-                "additionalProperties": False,
-            },
-        },
+        }
+        for tool in _TOOL_DEFINITIONS
     ]
+
+
+def get_tool_definitions() -> list[ToolDefinition]:
+    """
+    Get paperbench tool definitions in flat format (legacy).
+
+    For OpenAI-compatible format, use get_oai_tools() instead.
+
+    Returns:
+        List of tool definitions in flat format
+    """
+    return [
+        {
+            "type": "function",
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+        }
+        for tool in _TOOL_DEFINITIONS
+    ]
+
+
+def get_tool_names() -> list[str]:
+    """Get list of available tool names."""
+    return [tool["name"] for tool in _TOOL_DEFINITIONS]
 
 
 def is_submit_tool_call(tool_name: str) -> bool:
@@ -908,6 +956,276 @@ async def read_file_chunk(
     return summary + "\n".join(numbered)
 
 
+async def search_file(
+    computer: "ComputerInterface",
+    file: str,
+    query: str,
+    context_lines: int = 2,
+    max_matches: int = 5,
+    page: int = 1,
+) -> str:
+    """
+    Search for text in a file and return matches with context.
+
+    Args:
+        computer: The ComputerInterface to execute on
+        file: Path to the file to search
+        query: Text to search for (case-insensitive)
+        context_lines: Lines of context before/after each match
+        max_matches: Maximum matches per page
+        page: Which page of results (1-indexed)
+
+    Returns:
+        Matching lines with context and line numbers
+    """
+    result = await computer.send_shell_command(f"cat {file}")
+    content = result.output.decode("utf-8").strip()
+    lines = content.splitlines()
+
+    # Find matching line indices (case-insensitive)
+    query_lower = query.lower()
+    match_indices = [i for i, line in enumerate(lines) if query_lower in line.lower()]
+
+    if not match_indices:
+        return f"No matches found for '{query}' in {file}"
+
+    total_matches = len(match_indices)
+    total_pages = (total_matches + max_matches - 1) // max_matches
+
+    if page < 1 or page > total_pages:
+        return f"Invalid page {page}. Total pages: {total_pages}"
+
+    # Get matches for this page
+    start_idx = (page - 1) * max_matches
+    end_idx = min(start_idx + max_matches, total_matches)
+    page_matches = match_indices[start_idx:end_idx]
+
+    output_parts = [f"Found {total_matches} matches. Showing page {page}/{total_pages}.\n"]
+
+    for match_idx in page_matches:
+        # Get context window
+        ctx_start = max(0, match_idx - context_lines)
+        ctx_end = min(len(lines), match_idx + context_lines + 1)
+
+        output_parts.append(f"\n--- Match at line {match_idx + 1} ---")
+        for i in range(ctx_start, ctx_end):
+            marker = ">>>" if i == match_idx else "   "
+            output_parts.append(f"{marker} {i + 1}: {lines[i]}")
+
+    return "\n".join(output_parts)
+
+
+async def execute_submit(end_message: str) -> str:
+    """
+    Handle the submit tool call (signals agent completion).
+
+    This is a no-op that just returns confirmation.
+    The actual completion detection is done via is_submit_tool_call().
+
+    Args:
+        end_message: The agent's final message
+
+    Returns:
+        Confirmation string
+    """
+    return f"Submission received: {end_message}"
+
+
+async def execute_tool(
+    computer: "ComputerInterface",
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> str:
+    """
+    Execute a paperbench tool by name.
+
+    This is a convenience function that dispatches to the appropriate
+    tool execution function based on the tool name.
+
+    Args:
+        computer: The ComputerInterface to execute on
+        tool_name: Name of the tool to execute
+        tool_args: Arguments to pass to the tool
+
+    Returns:
+        Tool execution result as a string
+
+    Example:
+        >>> result = await execute_tool(computer, "bash", {"cmd": "ls -la"})
+    """
+    if tool_name == "bash":
+        return await execute_bash(computer, tool_args["cmd"])
+    elif tool_name == "python-tool":
+        return await execute_python(computer, tool_args["code"])
+    elif tool_name == "read_file_chunk":
+        return await read_file_chunk(
+            computer,
+            tool_args["file"],
+            tool_args.get("start_line", 1),
+            tool_args.get("max_lines", 50),
+        )
+    elif tool_name == "search_file":
+        return await search_file(
+            computer,
+            tool_args["file"],
+            tool_args["query"],
+            tool_args.get("context_lines", 2),
+            tool_args.get("max_matches", 5),
+            tool_args.get("page", 1),
+        )
+    elif tool_name == "submit":
+        return await execute_submit(tool_args["end_message"])
+    else:
+        return f"ERROR: Unknown tool '{tool_name}'"
+
+
+# Type for tool functions
+ToolFunction = Callable[..., Awaitable[str]]
+
+
+def get_tool_map(computer: "ComputerInterface") -> dict[str, Callable[..., Awaitable[str]]]:
+    """
+    Get a mapping from tool names to callable functions.
+
+    This returns a dict that maps tool names to async callables.
+    Each callable takes the tool arguments as keyword arguments.
+
+    Args:
+        computer: The ComputerInterface to bind tools to
+
+    Returns:
+        Dict mapping tool name -> async callable
+
+    Example:
+        >>> tool_map = get_tool_map(computer)
+        >>> result = await tool_map["bash"](cmd="ls -la")
+    """
+    return {
+        "bash": lambda **kwargs: execute_bash(computer, kwargs["cmd"]),
+        "python-tool": lambda **kwargs: execute_python(computer, kwargs["code"]),
+        "read_file_chunk": lambda **kwargs: read_file_chunk(
+            computer,
+            kwargs["file"],
+            kwargs.get("start_line", 1),
+            kwargs.get("max_lines", 50),
+        ),
+        "search_file": lambda **kwargs: search_file(
+            computer,
+            kwargs["file"],
+            kwargs["query"],
+            kwargs.get("context_lines", 2),
+            kwargs.get("max_matches", 5),
+            kwargs.get("page", 1),
+        ),
+        "submit": lambda **kwargs: execute_submit(kwargs["end_message"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace Dataset utilities
+# ---------------------------------------------------------------------------
+
+
+def get_hf_dataset(code_only: bool = False) -> "Dataset":
+    """
+    Get paperbench as a HuggingFace Dataset.
+
+    Returns a Dataset with columns compatible with the verifiers framework:
+    - example_id: int - unique identifier
+    - prompt: list[dict] - initial messages for the rollout
+    - answer: str - empty (paperbench uses judge-based scoring)
+    - task: str - paper_id
+    - info: dict - paper metadata and rubric info
+
+    Args:
+        code_only: If True, use code-only mode
+
+    Returns:
+        HuggingFace Dataset object
+
+    Example:
+        >>> dataset = get_hf_dataset()
+        >>> len(dataset)
+        20
+        >>> dataset[0]["task"]
+        'rice'
+    """
+    from datasets import Dataset as HFDataset
+
+    prompt_messages = get_initial_prompt(code_only)
+    rows = []
+
+    for idx, paper_id in enumerate(list_paper_ids()):
+        paper = _get_paper_info(paper_id)
+        rubric = get_rubric(paper_id)
+        leaves = rubric.get_leaf_nodes()
+
+        if code_only:
+            leaves = [l for l in leaves if l.task_category == "Code Development"]
+
+        rows.append({
+            "example_id": idx,
+            "prompt": prompt_messages,
+            "answer": "",  # Paperbench uses judge-based scoring, not exact match
+            "task": paper_id,
+            "info": {
+                "paper_id": paper_id,
+                "title": paper.title,
+                "paper_pdf_path": str(paper.paper_pdf),
+                "paper_md_path": str(paper.paper_md),
+                "addendum_path": str(paper.addendum),
+                "rubric_path": str(paper.rubric),
+                "num_criteria": len(leaves),
+                "total_weight": sum(l.weight for l in leaves),
+                "task_categories": list({l.task_category for l in leaves if l.task_category}),
+                "oai_tools": get_oai_tools(),
+            },
+        })
+
+    return HFDataset.from_list(rows)
+
+
+def get_paper_hf_row(paper_id: str, code_only: bool = False) -> dict[str, Any]:
+    """
+    Get a single paper formatted as a HuggingFace Dataset row.
+
+    This returns a dict with the same columns as get_hf_dataset(),
+    useful for creating single-paper datasets.
+
+    Args:
+        paper_id: The paper ID
+        code_only: If True, use code-only mode
+
+    Returns:
+        Dict with example_id, prompt, answer, task, info columns
+    """
+    paper = _get_paper_info(paper_id)
+    rubric = get_rubric(paper_id)
+    leaves = rubric.get_leaf_nodes()
+
+    if code_only:
+        leaves = [l for l in leaves if l.task_category == "Code Development"]
+
+    return {
+        "example_id": 0,
+        "prompt": get_initial_prompt(code_only),
+        "answer": "",
+        "task": paper_id,
+        "info": {
+            "paper_id": paper_id,
+            "title": paper.title,
+            "paper_pdf_path": str(paper.paper_pdf),
+            "paper_md_path": str(paper.paper_md),
+            "addendum_path": str(paper.addendum),
+            "rubric_path": str(paper.rubric),
+            "num_criteria": len(leaves),
+            "total_weight": sum(l.weight for l in leaves),
+            "task_categories": list({l.task_category for l in leaves if l.task_category}),
+            "oai_tools": get_oai_tools(),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
@@ -916,6 +1234,8 @@ __all__ = [
     # Types
     "ChatMessage",
     "PaperInfo",
+    "ChatCompletionToolParam",
+    "FunctionDefinition",
     "ToolDefinition",
     "RubricNode",
     "PaperBenchExample",
@@ -936,16 +1256,26 @@ __all__ = [
     "read_paper_rubric",
     # Setup function
     "run_paper_setup",
-    # Tool utilities
+    # Tool utilities - definitions
+    "get_oai_tools",
     "get_tool_definitions",
+    "get_tool_names",
     "is_submit_tool_call",
+    # Tool utilities - execution
     "execute_bash",
     "execute_python",
     "read_file_chunk",
+    "search_file",
+    "execute_submit",
+    "execute_tool",
+    "get_tool_map",
     # Rubric utilities
     "get_rubric",
     "get_rubric_dict",
-    # Dataset utilities
+    # Dataset utilities - legacy
     "get_paperbench_dataset",
     "get_paper_as_dict",
+    # Dataset utilities - HuggingFace
+    "get_hf_dataset",
+    "get_paper_hf_row",
 ]

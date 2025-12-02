@@ -27,6 +27,8 @@ from paperbench.api import (
     # Types
     ChatMessage,
     PaperInfo,
+    ChatCompletionToolParam,
+    FunctionDefinition,
     ToolDefinition,
     RubricNode,
     PaperBenchExample,
@@ -47,18 +49,28 @@ from paperbench.api import (
     read_paper_rubric,
     # Setup function
     run_paper_setup,
-    # Tool utilities
+    # Tool utilities - definitions
+    get_oai_tools,
     get_tool_definitions,
+    get_tool_names,
     is_submit_tool_call,
+    # Tool utilities - execution
     execute_bash,
     execute_python,
     read_file_chunk,
+    search_file,
+    execute_submit,
+    execute_tool,
+    get_tool_map,
     # Rubric utilities
     get_rubric,
     get_rubric_dict,
-    # Dataset utilities
+    # Dataset utilities - legacy
     get_paperbench_dataset,
     get_paper_as_dict,
+    # Dataset utilities - HuggingFace
+    get_hf_dataset,
+    get_paper_hf_row,
 )
 
 # Lazy imports for heavy dependencies
@@ -141,6 +153,8 @@ __all__ = [
     # Lightweight API - Types
     "ChatMessage",
     "PaperInfo",
+    "ChatCompletionToolParam",
+    "FunctionDefinition",
     "ToolDefinition",
     "RubricNode",
     "PaperBenchExample",
@@ -161,18 +175,28 @@ __all__ = [
     "read_paper_rubric",
     # Lightweight API - Setup function
     "run_paper_setup",
-    # Lightweight API - Tool utilities
+    # Lightweight API - Tool utilities (definitions)
+    "get_oai_tools",
     "get_tool_definitions",
+    "get_tool_names",
     "is_submit_tool_call",
+    # Lightweight API - Tool utilities (execution)
     "execute_bash",
     "execute_python",
     "read_file_chunk",
+    "search_file",
+    "execute_submit",
+    "execute_tool",
+    "get_tool_map",
     # Lightweight API - Rubric utilities
     "get_rubric",
     "get_rubric_dict",
-    # Lightweight API - Dataset utilities
+    # Lightweight API - Dataset utilities (legacy)
     "get_paperbench_dataset",
     "get_paper_as_dict",
+    # Lightweight API - Dataset utilities (HuggingFace)
+    "get_hf_dataset",
+    "get_paper_hf_row",
     # Heavy classes (lazy loaded)
     "PaperBench",
     "PBTask",
