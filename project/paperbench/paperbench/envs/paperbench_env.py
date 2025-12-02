@@ -7,11 +7,13 @@ This is a ToolEnv subclass that integrates PaperBench with the verifiers framewo
 from __future__ import annotations
 
 import json
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
 
 from verifiers.envs.tool_env import ToolEnv
 from verifiers.rubrics.rubric import Rubric
 from verifiers.types import State
+from verifiers.utils.decorators import cleanup
 
 from paperbench import (
     get_hf_dataset,
@@ -92,8 +94,14 @@ class PaperBenchEnvironment(ToolEnv):
         """
         paper_id = state["task"]
 
-        # Create and start container
-        computer = await self._runtime._start_computer(self._computer_config).__aenter__()
+        # Use AsyncExitStack to manage container lifecycle
+        stack = AsyncExitStack()
+        computer = await stack.enter_async_context(
+            self._runtime._start_computer(self._computer_config)
+        )
+
+        # Store stack for cleanup
+        state["_exit_stack"] = stack
         state["computer"] = computer
 
         # Run paper setup (upload instructions, PDF, etc.)
@@ -144,37 +152,35 @@ class PaperBenchEnvironment(ToolEnv):
         """Check if rollout should stop."""
         # Stop if submit was called
         if state.get("submit_called", False):
-            await self._grade_and_cleanup(state)
+            await self._do_grading(state)
             return True
 
         # Stop if max steps reached
         if state.get("step", 0) >= self.max_steps:
-            await self._grade_and_cleanup(state)
+            await self._do_grading(state)
             return True
 
         return False
 
-    async def _grade_and_cleanup(self, state: State) -> None:
-        """Grade the submission and clean up container."""
+    async def _do_grading(self, state: State) -> None:
+        """Grade the submission."""
         computer: ComputerInterface = state.get("computer")
         if computer is None:
             return
 
         paper_id = state["task"]
-
-        # Simple grading - check if submission exists and reproduce.sh runs
         grade = await self._simple_grade(computer, paper_id)
         state["grade"] = grade
         state["reward"] = grade["score"]
 
-        # Cleanup container
-        try:
-            await computer.__aexit__(None, None, None)
-        except Exception:
-            pass
-
-        # Remove non-serializable reference
-        state.pop("computer", None)
+    @cleanup
+    async def cleanup_container(self, state: State) -> None:
+        """Clean up container resources. Called automatically by framework."""
+        stack: AsyncExitStack | None = state.get("_exit_stack")
+        if stack is not None:
+            await stack.aclose()
+            state.pop("_exit_stack", None)
+            state.pop("computer", None)
 
     async def _simple_grade(self, computer: ComputerInterface, paper_id: str) -> dict:
         """
