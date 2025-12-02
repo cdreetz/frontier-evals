@@ -26,18 +26,54 @@ dependencies = [
     "asyncvnc",
     "structlog",
     "async-lru",
+    "openai",
 ]
 
 [tool.setuptools]
 packages = { find = { include = ["alcatraz", "alcatraz.*"] } }
 
-[project.optional-dependencies]
-formatters = ["black>=23.3", "isort>=5.13"]
-dev = ["pre-commit>=3.7"]
-
-[tool.black]
-line-length = 100 # match the precommit
-
 [build-system]
 requires = ["setuptools<78.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.pyright]
+typeCheckingMode = "off" # we use mypy
+
+[dependency-groups]
+dev = [
+  "mypy==1.18.2",
+  "poethepoet>=0.36.0",
+  "pre-commit>=4.2.0",
+  "ruff>=0.12.1",
+  "pylint>=3.2.7",
+  "types-docker==7.1.0.20251009",
+  "flask",
+  "chz",
+]
+
+[tool.mypy]
+strict = true
+local_partial_types = true
+# These two make life easier if you use a lot of untyped libraries:
+warn_return_any = false
+allow_untyped_calls = true
+# Do not use `ignore_missing_imports`, instead use:
+disable_error_code = ["import-untyped"]
+# If you don't want to force use of type annotations:
+# allow_incomplete_defs = true
+# allow_untyped_defs = true
+# allow_any_generics = true
+
+[[tool.mypy.overrides]]
+module = ["aioconsole", "aioconsole.*", "chz", "chz.*", "flask"]
+ignore_missing_imports = true
+
+[tool.pylint]
+disable = ["all"]
+# will eventually be supported by ruff: github.com/astral-sh/ruff/issues/2914
+enable = ["cyclic-import"]
+
+[tool.poe.tasks]
+lint = "ruff check --fix"
+typecheck = "mypy ."
+lint-extra = "pylint alcatraz"

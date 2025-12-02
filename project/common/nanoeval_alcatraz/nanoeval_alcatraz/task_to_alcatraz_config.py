@@ -21,6 +21,10 @@ def task_to_alcatraz_config(task: ComputerConfiguration, config: ClusterConfig) 
             f"The {task.network_mode} network mode is not supported on Alcatraz, and will never be. Please change it, or stop using Alcatraz."
         )
 
+    if task.network_mode == NetworkMode.NONE:
+        logger.info("Using network_mode=none for task")
+        config = config.model_copy(update={"no_network": True})
+
     if task.azure_vm_sku:
         logger.info("Using custom azure_vm_sku: %s", task.azure_vm_sku)
         config = config.model_copy(update={"azure_vm_sku": task.azure_vm_sku})

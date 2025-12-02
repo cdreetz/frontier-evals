@@ -19,17 +19,7 @@ from contextlib import AsyncExitStack, ExitStack, contextmanager
 from pathlib import Path
 from subprocess import CalledProcessError
 from types import TracebackType
-from typing import (
-    Any,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Generator,
-    Literal,
-    NotRequired,
-    Self,
-    cast,
-)
+from typing import Any, AsyncIterator, Generator, Literal, NotRequired, Self, cast
 from uuid import uuid4
 
 import docker
@@ -70,8 +60,6 @@ _WAIT_FOR_TIMEOUT_INTERRUPT = 10
 # Do not use dynamic ports here (32_768-65_535) because they are not guaranteed to be open on Linux.
 _FREE_PORTS: set[int] = set(range(*map(int, os.getenv("FREE_PORTS", "10000-32767").split("-"))))
 
-ALCATRAZ_TIMEOUT = int(os.getenv("ALCATRAZ_TIMEOUT", 60))
-
 VS_CODE_PORT = 8000
 
 
@@ -104,7 +92,7 @@ class ContainerNetConfig(TypedDict):
 class CommandOutputResult(TypedDict):
     # None if command is still running
     exit_code: int | None
-    result: str
+    result: bytes
     running: bool
 
 
@@ -122,6 +110,7 @@ class ClusterConfig(ABC, SerializableBaseModel):
     azure_container_config: dict[str, Any] | None = None
     docker_compose_yaml: str | None = None
     tmux_enabled: bool = False
+    no_network: bool = False
 
     # Pydantic config
     model_config = ConfigDict(
@@ -173,6 +162,7 @@ class LocalConfig(ClusterConfig):
             azure_container_config=self.azure_container_config,
             docker_compose_yaml=self.docker_compose_yaml,
             tmux_enabled=self.tmux_enabled,
+            no_network=self.no_network,
         )
 
 
@@ -354,6 +344,7 @@ class BaseAlcatrazCluster(ABC):
         docker_compose_yaml: str | None = None,
         tmux_enabled: bool = False,
         docker_host: str = "unix:///var/run/docker.sock",
+        no_network: bool = False,
     ):
         if jupyter_setup is None:
             jupyter_setup = ["jupyter", "kernel", "--ip", "0.0.0.0"]
@@ -376,6 +367,7 @@ class BaseAlcatrazCluster(ABC):
         self.container_registry_credentials = container_registry_credentials
         self.docker_compose_yaml = docker_compose_yaml
         self.tmux_enabled = tmux_enabled
+        self.no_network = no_network
         self.cmd_id_to_exec_id: dict[str, Any] = {}
         self._exit_stack = AsyncExitStack()
 
@@ -444,18 +436,21 @@ class BaseAlcatrazCluster(ABC):
         """
         # Dont forget to update _remove_firewall_stub when modifying this!!
         container.reload()
-        cid = container.id[:12]
+        container_id = container.id
+        if container_id is None:
+            raise RuntimeError("Container id is missing on the docker container.")
+        cid = container_id[:12]
         sandbox_key = container.attrs["NetworkSettings"].get("SandboxKey", "")
         veth = Path(sandbox_key).name
-        ctr_ip = next(iter(container.attrs["NetworkSettings"]["Networks"].values()))["IPAddress"]   # e.g. 172.18.0.2
-        net_info  = next(iter(container.attrs["NetworkSettings"]["Networks"].values()))
+        ctr_ip = next(iter(container.attrs["NetworkSettings"]["Networks"].values()))[
+            "IPAddress"
+        ]  # e.g. 172.18.0.2
+        net_info = next(iter(container.attrs["NetworkSettings"]["Networks"].values()))
         bridge_id = net_info["NetworkID"][:12]
         bridge_if = f"br-{bridge_id}"
 
         # Make a unique chain for the container -- atm silences all errors (such that if chain already exists it gets cleared), but TODO: separate errors
-        await async_subprocess_run(
-            ["bash", "-c", f"iptables -N CTR-{cid} 2>/dev/null || true"]
-        )
+        await async_subprocess_run(["bash", "-c", f"iptables -N CTR-{cid} 2>/dev/null || true"])
         await async_subprocess_run(["sudo", "iptables", "-F", f"CTR-{cid}"])
 
         # Insert jump from forward to this new container specific chain
@@ -472,10 +467,17 @@ class BaseAlcatrazCluster(ABC):
             ]
         )
         logger.info("Added jump for veth %s --> CTR-%s", veth, cid)
+
         # remove container specific jumps for host cleanliness
-        self._exit_stack.callback(
-            lambda cid=cid, veth=veth, bridge_if=bridge_if, ctr_ip=ctr_ip: asyncio.create_task(self._remove_firewall_stub(cid, veth, bridge_if, ctr_ip))
-        )
+        def _cleanup_firewall_stub() -> None:
+            # Fire and forget cleanup; no return value is expected.
+            task: asyncio.Task[None] = asyncio.create_task(
+                self._remove_firewall_stub(cid, veth, bridge_if, ctr_ip)
+            )
+            # Silence lint without altering behavior by keeping a scoped reference.
+            task.add_done_callback(lambda _t: None)
+
+        self._exit_stack.callback(_cleanup_firewall_stub)
 
     async def _remove_firewall_stub(self, cid: str, veth: str, bridge_if: str, ctr_ip: str) -> None:
         """
@@ -585,21 +587,31 @@ class BaseAlcatrazCluster(ABC):
             else:
                 logger.info("Skipping pull for %s", image)
 
-        logger.info("Creating network for %s", self.main_image)
-        try:
-            self.docker_network = await asyncio.to_thread(
-                self.docker_client.networks.create, "tinydockernet-" + self.container_group_name
-            )
-        except docker.errors.APIError as e:
-            if "all predefined address pools have been fully subnetted" in str(e):
-                raise RuntimeError(
-                    "Too many docker networks have been created. Most machines/laptops default to allowing 16 LocalCluster instances."
-                ) from e
-            raise
-        if isinstance(self, LocalCluster):
-            self._exit_stack.push_async_callback(
-                lambda: asyncio.to_thread(self.docker_network.remove)
-            )
+        if self.no_network:
+            if self.side_images:
+                raise AlcatrazUnexpectedSystemError(
+                    "side_images are not supported with no_network=True"
+                )
+            if self.docker_compose_yaml:
+                raise AlcatrazUnexpectedSystemError(
+                    "docker_compose_yaml is not supported with no_network=True"
+                )
+        else:
+            logger.info("Creating network for %s", self.main_image)
+            try:
+                self.docker_network = await asyncio.to_thread(
+                    self.docker_client.networks.create, "tinydockernet-" + self.container_group_name
+                )
+            except docker.errors.APIError as e:
+                if "all predefined address pools have been fully subnetted" in str(e):
+                    raise RuntimeError(
+                        "Too many docker networks have been created. Most machines/laptops default to allowing 16 LocalCluster instances."
+                    ) from e
+                raise
+            if isinstance(self, LocalCluster):
+                self._exit_stack.push_async_callback(
+                    lambda: asyncio.to_thread(self.docker_network.remove)
+                )
 
         self.containers: list[Container] = []
 
@@ -637,16 +649,15 @@ class BaseAlcatrazCluster(ABC):
             runtime = "nvidia" if self.is_nvidia_gpu_env else "runc"
 
         if runtime == "sysbox-runc":
-            _setup_cmds: list[str | None] = [
+            setup_cmds: list[str] = [
                 "wget https://downloads.nestybox.com/sysbox/releases/v0.6.4/sysbox-ce_0.6.4-0.linux_amd64.deb -O /tmp/sysbox-ce_0.6.4-0.linux_amd64.deb",
-                "sudo systemctl stop unattended-upgrades" if self.tmux_enabled else None,
+                "sudo systemctl stop unattended-upgrades",
                 "docker rm $(docker ps -a -q) -f",
                 "sudo apt-get update",
                 "sudo apt-get install -y jq linux-headers-$(uname -r)",
                 "sudo apt-get install -y /tmp/sysbox-ce_0.6.4-0.linux_amd64.deb",
                 "sudo systemctl status sysbox -n20",
             ]
-            setup_cmds: list[str] = [str(cmd) for cmd in _setup_cmds if cmd is not None]
             for cmd in setup_cmds:
                 result = subprocess.run(
                     cmd,
@@ -664,6 +675,18 @@ class BaseAlcatrazCluster(ABC):
                 logger.info(result.stdout)
 
         for i, image in enumerate(images):
+            if self.no_network and i > 0:
+                raise AlcatrazUnexpectedSystemError(
+                    "side images are not supported when no_network=True"
+                )
+
+            if self.no_network:
+                network_mode = "none"
+            elif self.local_network:
+                network_mode = "host"
+            else:
+                network_mode = "tinydockernet-" + self.container_group_name
+
             _, ctr = await self._create_container(
                 image=image,
                 name=f"container{i}-{self.container_group_name.split('alcatraz-')[1]}",
@@ -677,9 +700,7 @@ class BaseAlcatrazCluster(ABC):
                 tty=True,
                 detach=True,  # Equivalent to '-d'
                 remove=False,
-                network_mode=(
-                    "host" if self.local_network else "tinydockernet-" + self.container_group_name
-                ),
+                network_mode=network_mode,
                 user=0,
                 environment=environment,
                 volumes=(i == 0 and volume_config) or {},
@@ -687,7 +708,6 @@ class BaseAlcatrazCluster(ABC):
                 shm_size=self.shm_size if i == 0 else None,
                 mem_limit=self.mem_limit if i == 0 else None,
             )
-
 
             self.containers.append(ctr)
 
@@ -709,8 +729,7 @@ class BaseAlcatrazCluster(ABC):
             )
             if exit_code != 0:
                 raise AlcatrazUnexpectedSystemError(
-                    "Failed to install tmux in main container"
-                    f" Failed with exit code {exit_code}."
+                    f"Failed to install tmux in main container Failed with exit code {exit_code}."
                 )
 
     async def _stop(self) -> None:
@@ -774,12 +793,11 @@ class BaseAlcatrazCluster(ABC):
 
     async def get_container_by_id_prefix(self, cid_prefix: str) -> Container:
         """Where `cid_prefix` is the first 12 characters of the container ID."""
-        try:
-            container = next(c for c in self.containers if c.id.startswith(cid_prefix))
-        except StopIteration:
-            raise RuntimeError(f"No container with id prefix {cid_prefix} in this cluster")
-
-        return container
+        for container in self.containers:
+            container_id = container.id
+            if container_id and container_id.startswith(cid_prefix):
+                return container
+        raise RuntimeError(f"No container with id prefix {cid_prefix} in this cluster")
 
     async def send_shell_command(
         self,
@@ -790,9 +808,9 @@ class BaseAlcatrazCluster(ABC):
         environment: dict[str, str] | None = None,
         workdir: str | None = None,
     ) -> ExecutionResult:
-        assert (
-            timeout is None or timeout < self.limits["docker_client_timeout_seconds"]
-        ), f"{timeout=} must be less than {self.limits['docker_client_timeout_seconds']=} (which you can configure)"
+        assert timeout is None or timeout < self.limits["docker_client_timeout_seconds"], (
+            f"{timeout=} must be less than {self.limits['docker_client_timeout_seconds']=} (which you can configure)"
+        )
         """
         Not recommended. But for quick testing. It uses docker exec under the hood so directory changes aren't preserved.
 
@@ -842,7 +860,7 @@ class BaseAlcatrazCluster(ABC):
             return not exec_inspect["Running"]
 
     async def send_shell_command_get_result(
-        self, cmd_id: str, allow_unfinished: bool = False, content_idx: int = 0
+        self, cmd_id: str, allow_unfinished: bool = False, byte_idx: int = 0
     ) -> CommandOutputResult:
         """
         Get the result of a running shell command started with `send_shell_command_and_get_cmd_id`.
@@ -850,9 +868,8 @@ class BaseAlcatrazCluster(ABC):
         Args:
             cmd_id (str): Command ID returned from `send_shell_command_and_get_cmd_id`.
             allow_unfinished (bool, optional): If False, raises an AssertionError if the command is still running.
-            content_idx (int, optional):
-                Start displaying the output from this **line**. Defaults to 0. Note that the
-                output always includes a header line with the line number.
+            byte_idx (int, optional):
+                Start displaying the output from this **byte index**. Defaults to 0.
         """
 
         done = await self.send_shell_command_is_done(cmd_id)
@@ -866,18 +883,14 @@ class BaseAlcatrazCluster(ABC):
         except Exception:
             exit_code = None
 
-        result = (
-            self.containers[0]
-            .exec_run(cmd=["sh", "-c", f"cat /tmp/{cmd_id}_out"])
-            .output.decode("utf-8", errors="replace")
-            .strip()
-        )
+        result_output = self.containers[0].exec_run(cmd=["sh", "-c", f"cat /tmp/{cmd_id}_out"])
+        result_truncated = result_output.output[byte_idx:]
 
-        # Display the lines from idx onwards
-        result_tail = "\n".join(result.split("\n")[content_idx:])
-        result = f"From line #{content_idx}...\n{result_tail}"
-
-        return {"exit_code": exit_code, "result": result, "running": not done}
+        return {
+            "exit_code": exit_code,
+            "result": result_truncated,
+            "running": not done,
+        }
 
     def clean_send_shell_command_state(self, cmd_id: str) -> None:
         assert cmd_id in self.cmd_id_to_exec_id, f"Command state with cmd_id {cmd_id} not present!"
@@ -1013,16 +1026,13 @@ class BaseAlcatrazCluster(ABC):
         else:
             await asyncio.sleep(2)
 
-        assert len(await self._jupyter_list_connection_files()) == 0, (
-            "A jupyter kernel is already running before we started one. "
-            "Does your container image start Jupyter by default? This is not "
-            "supported, and you should change your image to not start Jupyter "
-            "by default."
-        )
+        connection_files = await self._jupyter_list_connection_files()
+        if len(connection_files) > 0:
+            return connection_files[0]
 
         self._exit_stack.callback(asyncio.create_task(self._jupyter_start_kernel()).cancel)
 
-        async with asyncio.timeout(ALCATRAZ_TIMEOUT):
+        async with asyncio.timeout(120):
             # Poll in runtime_dir until we find the connection file path.
             while True:
                 connection_files = await self._jupyter_list_connection_files()
@@ -1053,9 +1063,9 @@ class BaseAlcatrazCluster(ABC):
             await self._check_shell_command("pip install jupyter")
 
     async def get_container_net_config(self) -> ContainerNetConfig:
-        assert (
-            not self.local_network
-        ), "Net config cannot be fetched when running as network_mode=host"
+        assert not self.local_network, (
+            "Net config cannot be fetched when running as network_mode=host"
+        )
         # All Alcatraz containers are on the same network if self.local_network is disabled
 
         self.docker_network.reload()
@@ -1123,38 +1133,51 @@ class BaseAlcatrazCluster(ABC):
         # If something major is changed, like adding a jump to a new chain, make sure things are properly cleaned up by _remove_firewall_stub.
         await asyncio.to_thread(container.reload)
 
-        cid = container.id[:12]
-        attrs = container.attrs
+        container_id = container.id
+        if container_id is None:
+            raise RuntimeError("Container id is missing on the docker container.")
+        cid = container_id[:12]
 
-        ctr_ip = next(iter(container.attrs["NetworkSettings"]["Networks"].values()))["IPAddress"]   # e.g. 172.18.0.2
+        ctr_ip = next(iter(container.attrs["NetworkSettings"]["Networks"].values()))[
+            "IPAddress"
+        ]  # e.g. 172.18.0.2
         net_config = await self.get_container_net_config()
         subnet = net_config["subnet"]
 
         # Allow already established connections into the container
         await async_subprocess_run(
-            ["bash", "-c",
-             f"iptables -C CTR-{cid} -m conntrack --ctstate RELATED,ESTABLISHED "
-             f"-j ACCEPT -m comment --comment alcatraz_block 2>/dev/null || "
-             f"iptables -A CTR-{cid} -m conntrack --ctstate RELATED,ESTABLISHED "
-             f"-j ACCEPT -m comment --comment alcatraz_block"]
+            [
+                "bash",
+                "-c",
+                f"iptables -C CTR-{cid} -m conntrack --ctstate RELATED,ESTABLISHED "
+                f"-j ACCEPT -m comment --comment alcatraz_block 2>/dev/null || "
+                f"iptables -A CTR-{cid} -m conntrack --ctstate RELATED,ESTABLISHED "
+                f"-j ACCEPT -m comment --comment alcatraz_block",
+            ]
         )
 
         # Allow container to communicate within the Docker network (ctr -> ctr2)
         await async_subprocess_run(
-            ["bash", "-c",
-             f"iptables -C CTR-{cid} -s {subnet} -d {subnet} -j ACCEPT "
-             f"-m comment --comment alcatraz_block 2>/dev/null || "
-             f"iptables -A CTR-{cid} -s {subnet} -d {subnet} -j ACCEPT "
-             f"-m comment --comment alcatraz_block"]
+            [
+                "bash",
+                "-c",
+                f"iptables -C CTR-{cid} -s {subnet} -d {subnet} -j ACCEPT "
+                f"-m comment --comment alcatraz_block 2>/dev/null || "
+                f"iptables -A CTR-{cid} -s {subnet} -d {subnet} -j ACCEPT "
+                f"-m comment --comment alcatraz_block",
+            ]
         )
 
         # Reject all other outgoing connections from the container to the world
         await async_subprocess_run(
-            ["bash", "-c",
-             f"iptables -C CTR-{cid} -s {ctr_ip} -j REJECT "
-             f"-m comment --comment alcatraz_block 2>/dev/null || "
-             f"iptables -A CTR-{cid} -s {ctr_ip} -j REJECT "
-             f"-m comment --comment alcatraz_block"]
+            [
+                "bash",
+                "-c",
+                f"iptables -C CTR-{cid} -s {ctr_ip} -j REJECT "
+                f"-m comment --comment alcatraz_block 2>/dev/null || "
+                f"iptables -A CTR-{cid} -s {ctr_ip} -j REJECT "
+                f"-m comment --comment alcatraz_block",
+            ]
         )
 
     async def _ensure_input_block(self, container: docker.models.containers.Container) -> None:
@@ -1165,25 +1188,30 @@ class BaseAlcatrazCluster(ABC):
         # Important note: dont forget to update _remove_firewall_stub when modifying this!!
         # These rules need to be cleaned up on container shutdown, which is handled by _remove_firewall_stub
         # If the added rules are modified, the cleanup needs to be edited too.
-        cid  = container.id[:12]
         veth = Path(container.attrs["NetworkSettings"]["SandboxKey"]).name
 
         # Allow preexisting connections (so ctr -> host comms are allowed if the host initiated them). This is also separated by container.
         await async_subprocess_run(
-            ["bash", "-c",
-             f"iptables -C INPUT -i {veth} -m conntrack --ctstate RELATED,ESTABLISHED "
-             f"-m comment --comment alcatraz_block -j ACCEPT 2>/dev/null || "
-             f"iptables -I INPUT 1 -i {veth} -m conntrack --ctstate RELATED,ESTABLISHED "
-             f"-m comment --comment alcatraz_block -j ACCEPT"]
+            [
+                "bash",
+                "-c",
+                f"iptables -C INPUT -i {veth} -m conntrack --ctstate RELATED,ESTABLISHED "
+                f"-m comment --comment alcatraz_block -j ACCEPT 2>/dev/null || "
+                f"iptables -I INPUT 1 -i {veth} -m conntrack --ctstate RELATED,ESTABLISHED "
+                f"-m comment --comment alcatraz_block -j ACCEPT",
+            ]
         )
 
         # Prevent container from accessing host. (INPUT = host input)
         await async_subprocess_run(
-            ["bash", "-c",
-             f"iptables -C INPUT -i {veth} -j REJECT "
-             f"-m comment --comment alcatraz_block 2>/dev/null || "
-             f"iptables -I INPUT 2 -i {veth} -j REJECT "
-             f"-m comment --comment alcatraz_block"]
+            [
+                "bash",
+                "-c",
+                f"iptables -C INPUT -i {veth} -j REJECT "
+                f"-m comment --comment alcatraz_block 2>/dev/null || "
+                f"iptables -I INPUT 2 -i {veth} -j REJECT "
+                f"-m comment --comment alcatraz_block",
+            ]
         )
 
     async def add_weak_network_block_via_ip_tables(self) -> None:
@@ -1257,7 +1285,7 @@ class BaseAlcatrazCluster(ABC):
             "python -c \"import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)\""
         )
         # NOTE: python is not present in all images
-        assert check_result["exit_code"] in (0, 127), "Failed to undo network block"
+        assert check_result["exit_code"] in {0, 127}, "Failed to undo network block"
 
     async def is_kernel_started(self) -> bool:
         return self._kernel is not None
@@ -1266,7 +1294,7 @@ class BaseAlcatrazCluster(ABC):
         self, language: str = "python3", force_python_install: bool = False
     ) -> None:
         del language  # TODO implement language support
-        if self._kernel:
+        if await self.is_kernel_started():
             raise ValueError("Kernel already created.")
 
         await self._ensure_jupyter_installed(force_python_install)
@@ -1341,7 +1369,7 @@ class BaseAlcatrazCluster(ABC):
 
         self._exit_stack.push_async_callback(cleanup)
 
-        await self._kernel.wait_for_ready(timeout=ALCATRAZ_TIMEOUT)
+        await self._kernel.wait_for_ready(timeout=60.0)
         assert await self.kernel_is_alive()
         logger.info("Kernel is alive!")
 
@@ -1543,9 +1571,9 @@ class BaseAlcatrazCluster(ABC):
     ) -> bool:
         logger.info(f"commit_and_push {repository}:{tag}")
         assert credentials or acr_login, "must provide credentials or allow acr_login"
-        assert not (
-            credentials and acr_login
-        ), "cannot use both credentials and allow acr_login (disable acr_login if passing credentials)"
+        assert not (credentials and acr_login), (
+            "cannot use both credentials and allow acr_login (disable acr_login if passing credentials)"
+        )
         container = self.containers[container_id]
         container.commit(repository=repository, tag=tag)
         if credentials:
@@ -1564,7 +1592,7 @@ class BaseAlcatrazCluster(ABC):
                 max_pool_size=1000,
                 timeout=self.limits["docker_client_timeout_seconds"],
             )
-        res = docker_client_push.images.push(repository=repository, tag=tag) # type: ignore
+        res = docker_client_push.images.push(repository=repository, tag=tag)
         logger.info(f"pushed {repository}:{tag}")
         final_res = json.loads(res.strip().split("\n")[-1])
         if "error" in final_res:
@@ -1573,9 +1601,9 @@ class BaseAlcatrazCluster(ABC):
         return True
 
     async def _start_docker_compose(self) -> None:
-        assert (
-            self.docker_compose_yaml
-        ), "you should only call this if you've set docker_compose_yaml"
+        assert self.docker_compose_yaml, (
+            "you should only call this if you've set docker_compose_yaml"
+        )
 
         main_network = "tinydockernet-" + self.container_group_name
         docker_compose_dict = yaml.safe_load(self.docker_compose_yaml)
@@ -1667,25 +1695,27 @@ class BaseAlcatrazCluster(ABC):
         user = user or ""
         cmd_id = str(uuid4())
 
-        if not isinstance(cmd, str):
-            raise ValueError(f"cmd must be of type string, but it was type {type(cmd)}")
-
         if self.tmux_enabled:
             await self._send_tmux_command_with_cmd_id(cmd, cmd_id)
         else:
-            await self._send_shell_command_with_cmd_id(cmd, user, cmd_id)
+            await self._send_shell_command_with_cmd_id(cmd, cmd_id, user)
 
         return cmd_id
 
     async def _send_shell_command_with_cmd_id(self, cmd: str, cmd_id: str, user: str) -> None:
-        self.containers[0].exec_run(
-            cmd=["sh", "-c", f"touch /tmp/{cmd_id}_out && touch /tmp/{cmd_id}_exit_code"], user=user
+        await self.upload(cmd.encode(), f"/tmp/{cmd_id}")
+        await self.send_shell_command(
+            # Create the output files
+            f"touch /tmp/{cmd_id}_out /tmp/{cmd_id}_exit_code",
+            user=user,
         )
-        exec_run_cmd = f"{{ {cmd}; }} > /tmp/{cmd_id}_out 2>&1; echo $? > /tmp/{cmd_id}_exit_code"
-
         exec_id = self.docker_client.api.exec_create(
             self.containers[0].id,
-            cmd=["sh", "-c", exec_run_cmd],
+            cmd=[
+                "sh",
+                "-c",
+                f"sh /tmp/{cmd_id} > /tmp/{cmd_id}_out 2>&1; echo $? > /tmp/{cmd_id}_exit_code",
+            ],
             user=user,
         )["Id"]
         self.docker_client.api.exec_start(exec_id, detach=True)
@@ -1730,225 +1760,6 @@ class BaseAlcatrazCluster(ABC):
             f"Upload to Azure result: {result.stdout}, {result.stderr}, {result.returncode}"
         )
         return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
-
-    async def _start_periodic_task(
-        self, interval: int, task: Callable[..., Awaitable[None]], *args: Any, **kwargs: Any
-    ) -> asyncio.Task[None]:
-        """
-        A helper function to run another function periodically.
-        """
-
-        async def loop(*args: Any, **kwargs: Any) -> None:
-            while True:
-                try:
-                    await task(*args, **kwargs)
-                except Exception as e:
-                    logger.error(f"Error in periodic task {task.__name__}: {e}")
-                await asyncio.sleep(interval)
-
-        periodic_task = asyncio.create_task(loop(*args, **kwargs))
-        return periodic_task
-
-    async def upload_agent_logs(
-        self,
-        sources: list[str],
-        blob_dir: str,
-        account_name: str,
-        container_name: str,
-        sas_token: str,
-    ) -> None:
-        """
-        Tars all source directories and files into a single tarball and uploads it to the storage account.
-        """
-        logger.info("[upload_task] proceeding")
-        timestamp = time.strftime("%Y-%m-%dT%H-%M-%S-%Z", time.gmtime())
-        blob_file_id = Path(blob_dir) / f"{timestamp}.tar.gz"
-        container_tmp_dir = Path("/tmp") / f"{timestamp}"
-        container_tar_path = Path("/tmp") / f"{timestamp}.tar.gz"
-        # copy all the sources to a tmp dir and tar it
-        self.containers[0].exec_run(cmd=["mkdir", "-p", str(container_tmp_dir)])
-        for source in sources:
-            self.containers[0].exec_run(cmd=["cp", "-r", str(source), str(container_tmp_dir)])
-        logger.info("[upload_task] tarring")
-        # tar "/tmp/{timestamp}" into "/tmp/{timestamp}.tar.gz", such that when we extract it, we just get "{timestamp}/"
-        exit_code, output = self.containers[0].exec_run(
-            cmd=[
-                "tar",
-                "-czvf",
-                str(container_tar_path),
-                "-C",
-                str(container_tar_path.parent),
-                timestamp,
-            ]
-        )
-        logger.info(f"[upload_task] Tar result (exit code: {exit_code}): {output}")
-        # upload the tarball to azure
-        upload_cmd = f"az storage blob upload --account-name {account_name} --container-name {container_name} --name {str(blob_file_id)} --file {str(container_tar_path)} --sas-token '{sas_token}'"
-        exit_code, output = self.containers[0].exec_run(cmd=upload_cmd)
-        logger.info(f"[upload_task] Upload to Azure result (exit code: {exit_code}): {output}")
-
-    async def upload_status_and_agent_log(
-        self,
-        machine_id: str,
-        cmd_id: str,
-        blob_dir: str,
-        account_name: str,
-        container_name: str,
-        sas_token: str,
-    ) -> None:
-        """
-        Uploads the current status and agent_run.log once to the storage account.
-        """
-        # Upload status.json
-        status = {
-            "machine_id": machine_id,
-            "status": self.status,
-            "created_at": cast(int, self.created_at),  # type: ignore
-            "agent_finished_at": cast(int, self.agent_finished_at),  # type: ignore
-            "last_updated": int(time.time()),
-        }
-        status_file = "/tmp/status.json"
-        with open(status_file, "w") as f:
-            json.dump(status, f, sort_keys=True)
-        blob_file_path = Path(blob_dir) / "status.json"
-        self._upload_file_to_azure(
-            file_path=status_file,
-            account_name=account_name,
-            container_name=container_name,
-            blob_file_id=str(blob_file_path),
-            sas_token=sas_token,
-            overwrite=True,
-        )
-
-        # Upload agent_run.log
-        try:
-            result = await self.send_shell_command_get_result(cmd_id, allow_unfinished=True)
-        except AlcatrazOutOfDiskSpaceError as e:
-            logger.error(f"Out of disk space, cannot check status of command {cmd_id}!\n{e}")
-            result = {
-                "running": False,
-                "exit_code": 0,
-                "result": "",
-            }
-        agent_log_file = "/tmp/agent_run.log"
-        with open(agent_log_file, "w") as f:
-            f.write(
-                f"""Running: {result["running"]}\nExit Code: {result["exit_code"]}\n--- OUTPUT ---\n{result["result"]}"""
-            )
-        blob_file_path = Path(blob_dir) / "agent_run.log"
-        self._upload_file_to_azure(
-            file_path=agent_log_file,
-            account_name=account_name,
-            container_name=container_name,
-            blob_file_id=str(blob_file_path),
-            sas_token=sas_token,
-            overwrite=True,
-        )
-
-    async def start_periodic_status_update_and_upload(
-        self,
-        machine_id: str,
-        cmd_id: str,
-        sources: list[str],
-        account_name: str,
-        container_name: str,
-        blob_dir: str,
-        sas_token: str,
-        interval: int,
-    ) -> None:
-        """
-        Uploads the current status and agent_run.log to the storage account every interval seconds.
-        """
-
-        async def upload_task(
-            sources: list[str],
-            account_name: str,
-            container_name: str,
-            blob_dir: str,
-            sas_token: str,
-        ) -> None:
-            """
-            Uploads agent logs whilst command hasn't finished running, then uploads one final time when command
-            is done
-            """
-            # Get run status
-            try:
-                done = await self.send_shell_command_is_done(cmd_id)
-            except AlcatrazOutOfDiskSpaceError as e:
-                logger.error(f"Out of disk space, cannot check status of command {cmd_id}!\n{e}")
-                done = True
-
-            logger.info(f"[STATUS UPDATE] is send shell command done yet? {done}")
-            if done:
-                self.status = "done"
-                if self.agent_finished_at is None:  # type: ignore
-                    self.agent_finished_at = int(time.time())
-
-                # Continue to upload the tarball until the agent is done, and then we upload one last time.
-                logger.info("[upload_task] We're starting the upload task")
-                if self.completed_final_upload:  # type: ignore
-                    logger.info(
-                        "Agent is done and we've already uploaded the final tarball, skipping upload_task"
-                    )
-                    return
-                else:
-                    logger.info(
-                        "Agent is done but we haven't uploaded the final tarball yet, will do one last upload"
-                    )
-                    self.completed_final_upload = True
-
-            await self.upload_agent_logs(sources, blob_dir, account_name, container_name, sas_token)
-
-        async def upload_and_status_update_task(
-            machine_id: str,
-            cmd_id: str,
-            sources: list[str],
-            account_name: str,
-            container_name: str,
-            blob_dir: str,
-            sas_token: str,
-        ) -> None:
-            await upload_task(sources, account_name, container_name, blob_dir, sas_token)
-            await self.upload_status_and_agent_log(
-                machine_id, cmd_id, blob_dir, account_name, container_name, sas_token
-            )
-
-        # need to install az cli on the container
-        result = await self.send_shell_command("command -v az")
-        if result["exit_code"] != 0:
-            logger.info("azure-cli not found. Attempting to install it via pip...")
-            result = await self.send_shell_command("pip install azure-cli")
-            assert (
-                result["exit_code"] == 0
-            ), f"Failed to install azure-cli via pip: {result['result'].decode('utf-8', errors='replace')}"
-            logger.info("successfully installed azure-cli via pip")
-        else:
-            logger.info("azure-cli is already installed.")
-
-        # then, kick off tasks
-        self.status = "running"
-        self.completed_final_upload = False
-        self.agent_finished_at = None  # type: ignore
-        self.created_at = int(time.time())
-
-        periodic_task = await self._start_periodic_task(
-            interval,
-            upload_and_status_update_task,
-            machine_id,
-            cmd_id,
-            sources,
-            account_name,
-            container_name,
-            blob_dir,
-            sas_token,
-        )
-        self.periodic_upload_task = periodic_task
-
-    async def stop_periodic_status_update_and_upload(self) -> None:
-        try:
-            self.periodic_upload_task.cancel()
-        except Exception as e:
-            logger.error(f"Error stopping periodic upload task:\n{e}")
 
 
 garbage_collector_leader_lock_path = Path.home() / ".alcatraz"
@@ -2008,7 +1819,7 @@ class LocalCluster(BaseAlcatrazCluster):
         health_check: bool = False,
         jupyter_setup: list[str] | None = None,
         is_nvidia_gpu_env: bool = False,  # you better have nvidia gpus on your machine if you use this
-        privileged: bool = False,
+        privileged: bool = False,  # don't use on your mac. temp support for cua when running in VM
         environment: dict[str, str] | None = None,
         disk_mount_path: str | None = None,
         azure_container_config: dict[str, str] | None = None,
@@ -2020,9 +1831,8 @@ class LocalCluster(BaseAlcatrazCluster):
         container_registry_credentials: ContainerRegistryCredentials | None = None,
         docker_compose_yaml: str | None = None,
         tmux_enabled: bool = False,
+        no_network: bool = False,
     ):
-        if jupyter_setup is None:
-            jupyter_setup = ["jupyter", "kernel", "--ip", "0.0.0.0"]
         super().__init__(
             main_image=image,
             side_images=side_images if side_images else [],
@@ -2031,34 +1841,24 @@ class LocalCluster(BaseAlcatrazCluster):
             health_check=health_check,
             local_network=local_network,
             jupyter_setup=jupyter_setup,
+            is_nvidia_gpu_env=is_nvidia_gpu_env,
             privileged=privileged,
+            shm_size=shm_size,
+            mem_limit=mem_limit,
+            limits=limits,
             container_registry_credentials=container_registry_credentials,
             docker_compose_yaml=docker_compose_yaml,
             tmux_enabled=tmux_enabled,
             docker_host=docker_host,
+            no_network=no_network,
         )
-        self.tmux_enabled = tmux_enabled
-        self.docker_host = docker_host
-        self.main_image = image
-        self.side_images = side_images if side_images else []
-        self.pull_from_registry = pull_from_registry
-        self.health_check = health_check
-        self.local_network = local_network
-        self.jupyter_setup = jupyter_setup
-        self.is_nvidia_gpu_env = is_nvidia_gpu_env
-        self.privileged = privileged
+
         self.environment = environment
-        self.docker_compose_yaml = docker_compose_yaml
 
         self.disk_mount_path = disk_mount_path
         self.azure_files_config = azure_files_config
         self.azure_container_config = azure_container_config
         self.volumes_config = volumes_config
-
-        self.shm_size = shm_size
-        self.mem_limit = mem_limit
-
-        self.limits = limits
 
         if self.disk_mount_path:
             logger.info(f"Mounting disk at {disk_mount_path}...")
@@ -2136,7 +1936,6 @@ class LocalCluster(BaseAlcatrazCluster):
             logger.info(
                 f"Downloading blobstore data from {url} to {tar_dest} and extracting to {os_dest}"
             )
-
             bash_cmds = [
                 "sudo bash -c 'cd /usr/local/bin; curl -L https://aka.ms/downloadazcopy-v10-linux | tar --strip-components=1 --exclude=*.txt -xzvf -; chmod +x azcopy'",
                 f"time azcopy copy '{url}' '{tar_dest}'",
@@ -2222,7 +2021,7 @@ class LocalCluster(BaseAlcatrazCluster):
                 for net in docker_client.networks.list()
                 if cast(str, net.name).startswith("tinydockernet-alcatraz-")
                 and cast(str, net.name) not in nets_on_disk
-            ]  # type: ignore
+            ]
             await asyncio.gather(
                 *[asyncio.to_thread(self._garbage_collect_net, net) for net in nets]
             )

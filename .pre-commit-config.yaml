@@ -8,7 +8,7 @@ repos:
       # picks up config from [tool.ruff] in pyproject.toml
       - id: ruff-format
         name: ruff-format (black-style)
-        files: (?x)^project/(paperbench|swelancer|common/compatibility_api|common/compatibility_api_preparedness|common/preparedness_turn_completer)/
+        files: (?x)^project/(common/alcatraz|paperbench|swelancer|common/compatibility_api|common/compatibility_api_preparedness|common/preparedness_turn_completer)/
 
       # Lenient hook: runs auto‑fix on all files using a lenient config.
       - id: ruff
@@ -43,4 +43,10 @@ repos:
         name: uv-lock-swelancer
         args: [--project, project/swelancer]
         files: (?x)^project/swelancer/
+      - id: uv-lock
+        name: uv-lock-alcatraz
+        args:
+          - --project
+          - project/common/alcatraz
+        files: (?x)^project/common/alcatraz/
 exclude: '(?x)^(project/paperbench/paperbench/agents/aisi-basic-agent/inspect_ai|project/swelancer/issues)/'

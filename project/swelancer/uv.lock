@@ -152,6 +152,7 @@ dependencies = [
     { name = "ipykernel" },
     { name = "jupyter-client" },
     { name = "msgpack" },
+    { name = "openai" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pytest" },
@@ -170,18 +171,16 @@ requires-dist = [
     { name = "azure-identity" },
     { name = "azure-mgmt-compute" },
     { name = "azure-mgmt-network" },
-    { name = "black", marker = "extra == 'formatters'", specifier = ">=23.3" },
     { name = "blobfile" },
     { name = "docker" },
     { name = "fastapi" },
     { name = "filelock" },
     { name = "httpx" },
     { name = "ipykernel" },
-    { name = "isort", marker = "extra == 'formatters'", specifier = ">=5.13" },
     { name = "jupyter-client" },
     { name = "msgpack" },
+    { name = "openai" },
     { name = "pillow" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7" },
     { name = "pydantic" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -191,7 +190,18 @@ requires-dist = [
     { name = "tenacity" },
     { name = "vncdotool" },
 ]
-provides-extras = ["formatters", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "chz" },
+    { name = "flask" },
+    { name = "mypy", specifier = "==1.18.2" },
+    { name = "poethepoet", specifier = ">=0.36.0" },
+    { name = "pre-commit", specifier = ">=4.2.0" },
+    { name = "pylint", specifier = ">=3.2.7" },
+    { name = "ruff", specifier = ">=0.12.1" },
+    { name = "types-docker", specifier = "==7.1.0.20251009" },
+]
 
 [[package]]
 name = "altair"

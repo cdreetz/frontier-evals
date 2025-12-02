@@ -56,6 +56,12 @@ class BaseAlcatrazComputerInterfaceNoJupyter(ComputerInterface, ABC):
         pass
 
     async def disable_internet(self) -> None:
+        if getattr(self._cluster, "no_network", False):
+            logger.info(
+                "Cluster already using network_mode=none;"
+                " skipping firewall setup as not needed."
+            )
+            return
         res = await self.send_shell_command("hostname")
         cid_prefix = res.output.decode().strip()
 
@@ -218,5 +224,4 @@ class AlcatrazComputerRuntime(ComputerRuntime):
         async with task_to_alcatraz_config(task, self.env).build() as _cluster:
             computer = AlcatrazComputerInterface(cluster_value=_cluster)
             yield computer
-
 
