@@ -422,6 +422,493 @@ def read_paper_rubric(paper_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool definitions for external use
+# ---------------------------------------------------------------------------
+
+
+class ToolDefinition(TypedDict):
+    """Tool definition in OpenAI function format."""
+
+    type: str
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+def get_tool_definitions() -> list[ToolDefinition]:
+    """
+    Get the paperbench tool definitions in OpenAI function format.
+
+    These are the tools available to the agent during a rollout:
+    - bash: Execute bash commands
+    - python-tool: Execute Python code
+    - read_file_chunk: Read a portion of a file with line numbers
+    - search_file: Search for text in a file with context
+    - submit: Signal that the agent is finished
+
+    Returns:
+        List of tool definitions in OpenAI function tool format
+
+    Example:
+        >>> tools = get_tool_definitions()
+        >>> tool_names = [t["name"] for t in tools]
+        >>> "bash" in tool_names
+        True
+    """
+    return [
+        {
+            "type": "function",
+            "name": "bash",
+            "description": "Use this function to execute bash commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "description": "The bash command to execute.",
+                    },
+                },
+                "required": ["cmd"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "python-tool",
+            "description": (
+                "Use the python function to execute Python code.\n\n"
+                "The Python tool executes single-run Python scripts. Important notes:\n"
+                "1. Each execution is independent - no state is preserved between runs\n"
+                "2. You must explicitly use print() statements to see any output\n"
+                "3. Simply writing expressions (like in notebooks) will not display results\n"
+                "4. The script cannot accept interactive input during execution\n"
+                "5. Return statements alone won't produce visible output\n"
+                "6. All variables and imports are cleared between executions\n"
+                "7. Standard output (via print()) is the only way to see results"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The python code to execute.",
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "read_file_chunk",
+            "description": "Read a chunk of lines from a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Path to the file to read.",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Line number to start reading from (1-indexed).",
+                        "default": 1,
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to read (default: 50, max: 50).",
+                        "default": 50,
+                    },
+                },
+                "required": ["file"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "search_file",
+            "description": (
+                "Search for a keyword or phrase in a file and return matching lines with context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Path to the file to search.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Text to search for (case-insensitive).",
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Number of lines of context to show before and after each match (default: 2).",
+                        "default": 2,
+                    },
+                    "max_matches": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return per page (default: 5).",
+                        "default": 5,
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "Which page of results to return (1-indexed, default: 1).",
+                        "default": 1,
+                    },
+                },
+                "required": ["file", "query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "submit",
+            "description": "Signal that you are completely finished.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "end_message": {
+                        "type": "string",
+                        "description": "Final message to signal that you are finished.",
+                    },
+                },
+                "required": ["end_message"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def is_submit_tool_call(tool_name: str) -> bool:
+    """
+    Check if a tool call is the submit tool (signals completion).
+
+    Use this to detect when the agent has finished its work.
+
+    Args:
+        tool_name: The name of the tool being called
+
+    Returns:
+        True if this is the submit tool
+
+    Example:
+        >>> is_submit_tool_call("submit")
+        True
+        >>> is_submit_tool_call("bash")
+        False
+    """
+    return tool_name == "submit"
+
+
+# ---------------------------------------------------------------------------
+# Rubric utilities for building reward functions
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RubricNode:
+    """
+    A single node in the paperbench rubric tree.
+
+    The rubric is a hierarchical structure of requirements, where leaf nodes
+    have task categories that define how they should be evaluated:
+    - "Code Development": Check if submission contains correct implementation
+    - "Code Execution": Check if reproduce.sh runs successfully
+    - "Result Analysis": Check if outputs match expected results
+
+    Attributes:
+        id: Unique identifier for this task
+        requirements: Human-readable description of what's required
+        weight: Relative importance (for weighted scoring)
+        task_category: Only for leaf nodes - how to evaluate
+        finegrained_task_category: More specific category (optional)
+        sub_tasks: Child nodes (empty for leaf nodes)
+    """
+
+    id: str
+    requirements: str
+    weight: int
+    task_category: str | None
+    finegrained_task_category: str | None
+    sub_tasks: list["RubricNode"]
+
+    def is_leaf(self) -> bool:
+        """Check if this is a leaf node (has no sub-tasks)."""
+        return len(self.sub_tasks) == 0
+
+    def get_leaf_nodes(self) -> list["RubricNode"]:
+        """Get all leaf nodes in this subtree."""
+        if self.is_leaf():
+            return [self]
+        leaves = []
+        for sub in self.sub_tasks:
+            leaves.extend(sub.get_leaf_nodes())
+        return leaves
+
+    def count_leaves(self) -> int:
+        """Count the number of leaf nodes."""
+        return len(self.get_leaf_nodes())
+
+    def total_weight(self) -> int:
+        """Sum of all weights in the tree."""
+        if self.is_leaf():
+            return self.weight
+        return sum(sub.total_weight() for sub in self.sub_tasks)
+
+
+def _dict_to_rubric_node(data: dict[str, Any]) -> RubricNode:
+    """Convert a rubric dict to RubricNode."""
+    sub_tasks = [_dict_to_rubric_node(sub) for sub in data.get("sub_tasks", [])]
+    return RubricNode(
+        id=data["id"],
+        requirements=data["requirements"],
+        weight=data["weight"],
+        task_category=data.get("task_category"),
+        finegrained_task_category=data.get("finegrained_task_category"),
+        sub_tasks=sub_tasks,
+    )
+
+
+def get_rubric(paper_id: str) -> RubricNode:
+    """
+    Get the parsed rubric tree for a paper.
+
+    The rubric defines hierarchical grading criteria. Use this to:
+    - Understand what requirements need to be met
+    - Build custom reward/grading functions
+    - Analyze task complexity (number of leaves, weights, etc.)
+
+    Args:
+        paper_id: The paper ID
+
+    Returns:
+        RubricNode tree structure
+
+    Example:
+        >>> rubric = get_rubric("rice")
+        >>> rubric.id
+        'rice'
+        >>> len(rubric.get_leaf_nodes())
+        42  # number of gradable criteria
+    """
+    import json
+
+    paper = _get_paper_info(paper_id)
+    with open(paper.rubric) as f:
+        data = json.load(f)
+    return _dict_to_rubric_node(data)
+
+
+def get_rubric_dict(paper_id: str) -> dict[str, Any]:
+    """
+    Get the raw rubric as a dictionary.
+
+    Args:
+        paper_id: The paper ID
+
+    Returns:
+        The rubric data as a dict
+    """
+    import json
+
+    paper = _get_paper_info(paper_id)
+    with open(paper.rubric) as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Dataset format utilities
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PaperBenchExample:
+    """
+    A single paperbench example formatted for use in training/evaluation frameworks.
+
+    Attributes:
+        paper_id: Unique identifier for the paper
+        title: Paper title
+        prompt: The initial instructions given to the agent
+        num_criteria: Number of leaf-level grading criteria
+        total_weight: Sum of all criterion weights
+        categories: Set of task categories present in the rubric
+    """
+
+    paper_id: str
+    title: str
+    prompt: str
+    num_criteria: int
+    total_weight: int
+    categories: set[str]
+
+
+def get_paperbench_dataset(code_only: bool = False) -> list[PaperBenchExample]:
+    """
+    Get all paperbench papers as a dataset of examples.
+
+    This formats papers for use in external frameworks that expect
+    (prompt, task_info) pairs.
+
+    Args:
+        code_only: If True, use code-only instructions and filter rubric
+
+    Returns:
+        List of PaperBenchExample objects
+
+    Example:
+        >>> dataset = get_paperbench_dataset()
+        >>> len(dataset)
+        20  # number of papers
+        >>> dataset[0].paper_id
+        'rice'
+    """
+    prompt_text = get_instructions_text(code_only)
+    examples = []
+
+    for paper_id in list_paper_ids():
+        paper = _get_paper_info(paper_id)
+        rubric = get_rubric(paper_id)
+
+        # Get categories from leaf nodes
+        leaves = rubric.get_leaf_nodes()
+        categories = {leaf.task_category for leaf in leaves if leaf.task_category}
+
+        # If code_only, filter to only Code Development
+        if code_only:
+            leaves = [l for l in leaves if l.task_category == "Code Development"]
+            categories = {"Code Development"} if leaves else set()
+
+        examples.append(
+            PaperBenchExample(
+                paper_id=paper_id,
+                title=paper.title,
+                prompt=prompt_text,
+                num_criteria=len(leaves),
+                total_weight=sum(l.weight for l in leaves),
+                categories=categories,
+            )
+        )
+
+    return examples
+
+
+def get_paper_as_dict(paper_id: str, code_only: bool = False) -> dict[str, Any]:
+    """
+    Get a single paper formatted as a dictionary.
+
+    Useful for creating custom dataset formats.
+
+    Args:
+        paper_id: The paper ID
+        code_only: If True, use code-only mode
+
+    Returns:
+        Dictionary with paper info, prompt, and rubric summary
+    """
+    paper = _get_paper_info(paper_id)
+    rubric = get_rubric(paper_id)
+    leaves = rubric.get_leaf_nodes()
+
+    if code_only:
+        leaves = [l for l in leaves if l.task_category == "Code Development"]
+
+    return {
+        "paper_id": paper_id,
+        "title": paper.title,
+        "prompt": get_instructions_text(code_only),
+        "paper_pdf_path": str(paper.paper_pdf),
+        "paper_md_path": str(paper.paper_md),
+        "addendum_path": str(paper.addendum),
+        "rubric_path": str(paper.rubric),
+        "num_criteria": len(leaves),
+        "total_weight": sum(l.weight for l in leaves),
+        "task_categories": list({l.task_category for l in leaves if l.task_category}),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool execution helpers
+# ---------------------------------------------------------------------------
+
+
+async def execute_bash(computer: "ComputerInterface", cmd: str) -> str:
+    """
+    Execute a bash command on the container.
+
+    Args:
+        computer: The ComputerInterface to execute on
+        cmd: The bash command to run
+
+    Returns:
+        Command output as a string
+    """
+    result = await computer.send_shell_command(cmd=cmd)
+    return result.output.decode("utf-8").strip()
+
+
+async def execute_python(computer: "ComputerInterface", code: str) -> str:
+    """
+    Execute Python code on the container.
+
+    The code is written to a temp file and executed with python3.
+
+    Args:
+        computer: The ComputerInterface to execute on
+        code: The Python code to run
+
+    Returns:
+        Script output as a string
+    """
+    result = await computer.send_shell_command("mktemp -d")
+    tmp_dir = result.output.decode("utf-8").strip()
+    await computer.upload(code.encode("utf-8"), f"{tmp_dir}/code.py")
+    result = await computer.send_shell_command(f"python3 {tmp_dir}/code.py")
+    return result.output.decode("utf-8").strip()
+
+
+async def read_file_chunk(
+    computer: "ComputerInterface",
+    file: str,
+    start_line: int = 1,
+    max_lines: int = 50,
+) -> str:
+    """
+    Read a chunk of a file with line numbers.
+
+    Args:
+        computer: The ComputerInterface to execute on
+        file: Path to the file
+        start_line: Line to start reading from (1-indexed)
+        max_lines: Maximum lines to read (max 50)
+
+    Returns:
+        File content with line numbers
+    """
+    if start_line < 1:
+        return "ERROR: start_line must be >= 1"
+    if max_lines < 1:
+        return "ERROR: max_lines must be >= 1"
+    if max_lines > 50:
+        return "ERROR: max_lines cannot exceed 50"
+
+    result = await computer.send_shell_command(f"cat {file}")
+    content = result.output.decode("utf-8").strip()
+    lines = content.splitlines()
+
+    if start_line > len(lines):
+        return f"ERROR: start_line ({start_line}) is beyond total lines ({len(lines)})"
+
+    end_line = min(start_line + max_lines - 1, len(lines))
+    chunk = lines[start_line - 1 : end_line]
+    numbered = [f"{i + start_line}: {line}" for i, line in enumerate(chunk)]
+
+    summary = f"File has {len(lines)} total lines. Showing lines {start_line} to {end_line}.\n\n"
+    return summary + "\n".join(numbered)
+
+
+# ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
 
@@ -429,6 +916,9 @@ __all__ = [
     # Types
     "ChatMessage",
     "PaperInfo",
+    "ToolDefinition",
+    "RubricNode",
+    "PaperBenchExample",
     # Constants
     "WORKSPACE_BASE",
     "SUBMISSION_DIR",
@@ -446,4 +936,16 @@ __all__ = [
     "read_paper_rubric",
     # Setup function
     "run_paper_setup",
+    # Tool utilities
+    "get_tool_definitions",
+    "is_submit_tool_call",
+    "execute_bash",
+    "execute_python",
+    "read_file_chunk",
+    # Rubric utilities
+    "get_rubric",
+    "get_rubric_dict",
+    # Dataset utilities
+    "get_paperbench_dataset",
+    "get_paper_as_dict",
 ]

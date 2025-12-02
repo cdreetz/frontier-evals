@@ -27,6 +27,9 @@ from paperbench.api import (
     # Types
     ChatMessage,
     PaperInfo,
+    ToolDefinition,
+    RubricNode,
+    PaperBenchExample,
     # Constants
     WORKSPACE_BASE,
     SUBMISSION_DIR,
@@ -44,6 +47,18 @@ from paperbench.api import (
     read_paper_rubric,
     # Setup function
     run_paper_setup,
+    # Tool utilities
+    get_tool_definitions,
+    is_submit_tool_call,
+    execute_bash,
+    execute_python,
+    read_file_chunk,
+    # Rubric utilities
+    get_rubric,
+    get_rubric_dict,
+    # Dataset utilities
+    get_paperbench_dataset,
+    get_paper_as_dict,
 )
 
 # Lazy imports for heavy dependencies
@@ -123,14 +138,20 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    # Lightweight API (always available)
+    # Lightweight API - Types
     "ChatMessage",
     "PaperInfo",
+    "ToolDefinition",
+    "RubricNode",
+    "PaperBenchExample",
+    # Lightweight API - Constants
     "WORKSPACE_BASE",
     "SUBMISSION_DIR",
+    # Lightweight API - Prompt functions
     "get_instructions_path",
     "get_initial_prompt",
     "get_instructions_text",
+    # Lightweight API - Paper functions
     "get_paper_info",
     "list_paper_ids",
     "get_papers_directory",
@@ -138,7 +159,20 @@ __all__ = [
     "read_paper_markdown",
     "read_paper_addendum",
     "read_paper_rubric",
+    # Lightweight API - Setup function
     "run_paper_setup",
+    # Lightweight API - Tool utilities
+    "get_tool_definitions",
+    "is_submit_tool_call",
+    "execute_bash",
+    "execute_python",
+    "read_file_chunk",
+    # Lightweight API - Rubric utilities
+    "get_rubric",
+    "get_rubric_dict",
+    # Lightweight API - Dataset utilities
+    "get_paperbench_dataset",
+    "get_paper_as_dict",
     # Heavy classes (lazy loaded)
     "PaperBench",
     "PBTask",
