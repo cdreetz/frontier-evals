@@ -22,6 +22,7 @@ from nanoeval.metrics.agents import get_summary_error_aware
 from nanoeval.solvers.computer_tasks.code_execution_interface import (
     ComputerInterface,
     JupyterComputerInterface,
+    NetworkMode,
     RuntimeConfig,
 )
 from nanoeval.solvers.computer_tasks.solver import PythonCodingEval
@@ -543,6 +544,7 @@ class SWELancerEval(PythonCodingEval):
                         manager_commit=manager_commit,
                         issue_id=task["question_id"],
                         cwd=cwd,
+                        network_mode=NetworkMode.UNPROXIED,  # needed for JupyterComputerInterface
                         attempt_id=attempt_idx,
                         run_group_id=self.run_group_id,
                         run_id=run_id,

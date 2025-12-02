@@ -1297,6 +1297,12 @@ class BaseAlcatrazCluster(ABC):
         if await self.is_kernel_started():
             raise ValueError("Kernel already created.")
 
+        if self.no_network:
+            raise AlcatrazUnexpectedSystemError(
+                "Jupyter kernel startup is not supported when no_network=True. "
+                "Use network_mode=UNPROXIED (no firewall) or disable no_network."
+            )
+
         await self._ensure_jupyter_installed(force_python_install)
 
         # expose kernel ports on host machine
