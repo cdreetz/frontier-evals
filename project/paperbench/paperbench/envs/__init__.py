@@ -1,19 +1,13 @@
 """
-PaperBench Environments for external framework integration.
+PaperBench Environments for the verifiers framework.
 """
 
 from paperbench.envs.paperbench_env import (
     PaperBenchEnvironment,
-    create_sandbox,
-    execute_tool,
-    run_single_paper,
-    simple_grade,
+    PaperBenchRubric,
 )
 
 __all__ = [
     "PaperBenchEnvironment",
-    "create_sandbox",
-    "execute_tool",
-    "run_single_paper",
-    "simple_grade",
+    "PaperBenchRubric",
 ]
