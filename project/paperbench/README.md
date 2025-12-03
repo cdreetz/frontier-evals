@@ -144,7 +144,7 @@ To test that things are set up correctly, run the dummy agent with the dummy jud
 uv run python -m paperbench.nano.entrypoint \
     paperbench.paper_split=debug \
     paperbench.solver=paperbench.solvers.dummy.solver:PaperBenchDummySolver \
-    paperbench.solver.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.solver.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
     paperbench.solver.computer_runtime.env.pull_from_registry=false \
     paperbench.judge.scaffold=dummy \
     runner.recorder=nanoeval.json_recorder:json_recorder
@@ -159,7 +159,7 @@ cheap models.
 ```bash
 uv run python -m paperbench.nano.entrypoint \
     paperbench.solver=paperbench.solvers.basicagent.solver:BasicAgentSolver \
-    paperbench.solver.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.solver.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
     paperbench.solver.computer_runtime.env.pull_from_registry=false \
     paperbench.paper_split=dev \
     paperbench.judge.completer_config=preparedness_turn_completer.oai_completions_turn_completer:OpenAICompletionsTurnCompleter.Config \
@@ -189,10 +189,10 @@ uv run python -m paperbench.nano.entrypoint \
     paperbench.solver.completer_config.reasoning.effort='high' \
     paperbench.solver.completer_config.reasoning.summary='auto' \
     paperbench.solver.time_limit=86400 \
-    paperbench.solver.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.solver.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
     paperbench.solver.computer_runtime.env.pull_from_registry=false \
     paperbench.solver.computer_runtime.env.is_nvidia_gpu_env=true \
-    paperbench.reproduction.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.reproduction.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
     paperbench.reproduction.computer_runtime.env.pull_from_registry=false \
     paperbench.reproduction.computer_runtime.env.is_nvidia_gpu_env=true \
     paperbench.reproduction.timeout=86400 \
@@ -231,7 +231,7 @@ uv run python -m paperbench.nano.entrypoint \
     paperbench.paper_split=debug \
     paperbench.solver=paperbench.solvers.direct_submission.solver:PBDirectSubmissionSolver \
     paperbench.solver.submissions_dir=path/to/foo/ \
-    paperbench.solver.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.solver.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
     paperbench.solver.computer_runtime.env.pull_from_registry=false \
     paperbench.judge.scaffold=dummy \
     runner.recorder=nanoeval.json_recorder:json_recorder
