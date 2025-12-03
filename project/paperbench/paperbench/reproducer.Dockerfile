@@ -27,6 +27,13 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2
 # users can switch to 3.11 by running `update-alternatives --set python3 /usr/bin/python3.11`
 
+# Install pip and create python symlink (required by Alcatraz)
+RUN apt-get update && \
+    apt-get install -y \
+        python3-pip \
+        python-is-python3 && \
+    rm -rf /var/lib/apt/lists/*
+
 # you would then
 # 1. make a /submission dir 
 # 2. copy the submission there
