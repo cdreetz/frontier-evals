@@ -147,6 +147,9 @@ uv run python -m paperbench.nano.entrypoint \
     paperbench.solver.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
     paperbench.solver.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
     paperbench.solver.computer_runtime.env.pull_from_registry=false \
+    paperbench.reproduction.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
+    paperbench.reproduction.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.reproduction.computer_runtime.env.pull_from_registry=false \
     paperbench.judge.scaffold=dummy \
     runner.recorder=nanoeval.json_recorder:json_recorder
 ```
@@ -166,6 +169,9 @@ uv run python -m paperbench.nano.entrypoint \
     paperbench.paper_split=dev \
     paperbench.judge.completer_config=preparedness_turn_completer.oai_completions_turn_completer:OpenAICompletionsTurnCompleter.Config \
     paperbench.judge.completer_config.model='gpt-4.1-mini' \
+    paperbench.reproduction.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
+    paperbench.reproduction.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.reproduction.computer_runtime.env.pull_from_registry=false \
     paperbench.reproduction.timeout=60 \
     runner.max_retries=0 \
     runner.recorder=nanoeval.json_recorder:json_recorder
@@ -238,6 +244,9 @@ uv run python -m paperbench.nano.entrypoint \
     paperbench.solver.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
     paperbench.solver.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
     paperbench.solver.computer_runtime.env.pull_from_registry=false \
+    paperbench.reproduction.computer_runtime=nanoeval_alcatraz.alcatraz_computer_interface:AlcatrazComputerRuntime \
+    paperbench.reproduction.computer_runtime.env=alcatraz.clusters.local:LocalConfig \
+    paperbench.reproduction.computer_runtime.env.pull_from_registry=false \
     paperbench.judge.scaffold=dummy \
     runner.recorder=nanoeval.json_recorder:json_recorder
 ```
