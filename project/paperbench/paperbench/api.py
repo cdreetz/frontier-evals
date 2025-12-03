@@ -171,8 +171,8 @@ def get_instructions_path(code_only: bool = False) -> Path:
     """
     root = _get_paperbench_module_root()
     if code_only:
-        return root / "instructions" / "code_only_instructions.txt"
-    return root / "instructions" / "instructions.txt"
+        return root / "paperbench" /  "instructions" / "code_only_instructions.txt"
+    return root / "paperbench" /"instructions" / "instructions.txt"
 
 
 def get_initial_prompt(code_only: bool = False) -> list[ChatMessage]:
