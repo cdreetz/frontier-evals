@@ -48,6 +48,7 @@ from paperbench.rubric.tasks import TaskNode
 from preparedness_turn_completer.oai_completions_turn_completer import (
     OpenAICompletionsTurnCompleter,
 )
+from preparedness_turn_completer.turn_completer import TurnCompleter
 
 from alcatraz import LocalConfig
 from nanoeval.solvers.computer_tasks import ComputerConfiguration, NetworkMode
@@ -100,6 +101,18 @@ class PaperBenchEnvironment(StatefulToolEnv):
     - "simple": LLM-based evaluation (production quality, requires API key)
     - "random": Random 0/1 scores (for testing pipeline)
     - "dummy": Always returns 1.0 (for testing without evaluation)
+
+    For custom API endpoints (e.g., Prime Intellect), pass a completer_config:
+        from prime_intellect_completer import PrimeIntellectCompleter
+
+        env = PaperBenchEnvironment(
+            completer_config=PrimeIntellectCompleter.Config(
+                model="meta-llama/llama-3.1-70b-instruct",
+                api_key=os.environ.get("PRIME_API_KEY"),
+                team_id="your-team-id",  # optional
+            ),
+            ...
+        )
     """
 
     def __init__(
@@ -112,6 +125,7 @@ class PaperBenchEnvironment(StatefulToolEnv):
         dataset: Dataset | None = None,
         judge_type: Literal["simple", "random", "dummy"] = "simple",
         judge_model: str = "gpt-4o-2024-08-06",
+        completer_config: TurnCompleter.Config | None = None,
         **kwargs,
     ):
         self.code_only = code_only
@@ -119,6 +133,7 @@ class PaperBenchEnvironment(StatefulToolEnv):
         self.max_steps = max_steps
         self.judge_type = judge_type
         self.judge_model = judge_model
+        self.completer_config = completer_config
 
         self._runtime = AlcatrazComputerRuntime(env=LocalConfig())
         self._computer_config = ComputerConfiguration(
@@ -250,11 +265,17 @@ class PaperBenchEnvironment(StatefulToolEnv):
         paper_info = get_paper_info(paper_id)
 
         # Build completer config for SimpleJudge
+        # Use custom completer_config if provided, otherwise default to OpenAI
         completer_config = None
         if self.judge_type == "simple":
-            completer_config = OpenAICompletionsTurnCompleter.Config(
-                model=self.judge_model,
-            )
+            if self.completer_config is not None:
+                # Use custom completer (e.g., Prime Intellect)
+                completer_config = self.completer_config
+            else:
+                # Default to OpenAI
+                completer_config = OpenAICompletionsTurnCompleter.Config(
+                    model=self.judge_model,
+                )
 
         # The submission is at /home/submission in the container
         # For grading, we need to specify the submission path
@@ -353,6 +374,7 @@ def load_environment(
     paper_ids: list[str] | None = None,
     judge_type: Literal["simple", "random", "dummy"] = "simple",
     judge_model: str = "gpt-4o-2024-08-06",
+    completer_config: TurnCompleter.Config | None = None,
     **kwargs
 ):
     """
@@ -364,10 +386,24 @@ def load_environment(
         paper_ids: Optional list of paper IDs to filter to
         judge_type: "simple" (LLM), "random" (testing), or "dummy" (always pass)
         judge_model: Model to use for SimpleJudge (default: gpt-4o-2024-08-06)
+        completer_config: Custom TurnCompleter.Config for alternative API endpoints
+                         (e.g., PrimeIntellectCompleter.Config for Prime Intellect)
         **kwargs: Additional arguments passed to environment
 
     Returns:
         Configured PaperBenchEnvironment
+
+    Example with Prime Intellect:
+        from prime_intellect_completer import PrimeIntellectCompleter
+
+        env = load_environment(
+            paper_ids=["rice"],
+            completer_config=PrimeIntellectCompleter.Config(
+                model="meta-llama/llama-3.1-70b-instruct",
+                api_key=os.environ.get("PRIME_API_KEY"),
+                team_id="your-team-id",  # optional
+            ),
+        )
     """
     dataset = get_hf_dataset(code_only=code_only)
     if paper_ids:
@@ -381,6 +417,7 @@ def load_environment(
         code_only=code_only,
         judge_type=judge_type,
         judge_model=judge_model,
+        completer_config=completer_config,
         **kwargs
     )
 
