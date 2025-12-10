@@ -17,12 +17,33 @@ Leaf nodes are graded binary (0 or 1) based on their task_category:
 Internal nodes get weighted average scores from their children.
 """
 
+import os
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from datasets import Dataset
 from dotenv import load_dotenv
+load_dotenv()
+
+# --- Prime Intellect API Setup ---
+# Patch openai client to use Prime Intellect with team account
+import openai
+
+os.environ["OPENAI_BASE_URL"] = "https://api.pinference.ai/api/v1"
+os.environ["OPENAI_API_KEY"] = os.environ.get("PI_API_KEY", "")
+
+_original_client_init = openai.AsyncClient.__init__
+
+def _patched_client_init(self, **kwargs):
+    kwargs.setdefault("default_headers", {})
+    team_id = os.environ.get("PI_TEAM_ID")
+    if team_id:
+        kwargs["default_headers"]["X-Prime-Team-ID"] = team_id
+    _original_client_init(self, **kwargs)
+
+openai.AsyncClient.__init__ = _patched_client_init
+# --- End Prime Intellect Setup ---
 
 import verifiers as vf
 from verifiers.envs.stateful_tool_env import StatefulToolEnv
@@ -56,8 +77,6 @@ from nanoeval_alcatraz import AlcatrazComputerRuntime
 
 if TYPE_CHECKING:
     from nanoeval.solvers.computer_tasks.code_execution_interface import ComputerInterface
-
-load_dotenv()
 
 
 class PaperBenchRubric(Rubric):
