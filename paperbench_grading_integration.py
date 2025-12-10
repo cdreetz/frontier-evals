@@ -40,8 +40,9 @@ def _patched_client_init(self, **kwargs):
     team_id = os.environ.get("PI_TEAM_ID")
     if team_id:
         kwargs["default_headers"]["X-Prime-Team-ID"] = team_id
-    print(f"[Prime Intellect] Creating OpenAI client with base_url={kwargs.get('base_url', os.environ.get('OPENAI_BASE_URL'))}, team_id={team_id}")
     _original_client_init(self, **kwargs)
+    # Confirm actual base_url on the created client
+    print(f"[Prime Intellect] Client created - base_url={self.base_url}, team_id={team_id}")
 
 openai.AsyncClient.__init__ = _patched_client_init
 # --- End Prime Intellect Setup ---
