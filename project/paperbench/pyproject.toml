@@ -33,6 +33,10 @@ dependencies = [
 [tool.setuptools]
 packages = { find = { include = ["paperbench", "paperbench.*"] } }
 
+[tool.setuptools.package-data]
+paperbench = ["**/*.txt", "**/*.md", "**/*.json", "**/*.yaml"]
+
+
 [tool.pyright]
 extraPaths = [
     "../common/alcatraz",
